@@ -1,4 +1,4 @@
-"""Small file helpers shared by the experiment commands."""
+"""Fungsi bantu simpan JSON dan hash file/source untuk reproducibility."""
 from __future__ import annotations
 
 import hashlib
@@ -29,6 +29,7 @@ def source_provenance(root: Path) -> dict:
 
     commit = git("rev-parse", "HEAD")
     dirty = git("status", "--porcelain")
+    # Hash isi source juga dicatat, termasuk saat belum ada commit Git.
     digest = hashlib.sha256()
     for folder in ("src", "configs", "notebooks"):
         for path in sorted((root / folder).rglob("*")):

@@ -1,4 +1,4 @@
-"""Command-line entrypoint; notebook subprocesses always launch exactly one run."""
+"""Baca pilihan CLI/notebook, lalu panggil audit, preflight, train, atau evaluate."""
 from __future__ import annotations
 
 import argparse
@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _setup_runtime(output: Path) -> None:
+    # Arahkan pengaturan library ke output, agar folder dataset tidak tersentuh.
     output.mkdir(parents=True, exist_ok=True)
     settings_dir = output / ".ultralytics"
     matplotlib_dir = output / ".matplotlib"
@@ -82,6 +83,7 @@ def main(argv: list[str] | None = None) -> None:
         write_json(output / "preflight.json", result)
         print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
         return
+    # Gabungkan pilihan pengguna dengan YAML sebelum menjalankan perintah terpilih.
     config = load_config(**{name: getattr(args, name) for name in
                           ("stage", "student", "method", "seed", "mode", "device", "dataset_root",
                            "teacher_ckpt", "output_root", "config_dir", "wandb_mode", "expected_images", "weights")})

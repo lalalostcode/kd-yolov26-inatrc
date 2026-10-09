@@ -1,4 +1,4 @@
-"""CSAKD equations with explicit paper/author variants and graph-derived module pairs."""
+"""CSAKD dengan varian paper/penulis dan pasangan modul yang dipilih dari graph YOLO."""
 from __future__ import annotations
 import math
 import torch
@@ -17,6 +17,7 @@ def configure_csakd(config):
 
 
 def module_indices(model):
+    # Pilih pasangan backbone/neck dari graph YOLO, bukan indeks layer yang di-hardcode.
     boundary = len(model.yaml["backbone"])
     lateral = set()
     for module in model.model[boundary:]:
@@ -46,6 +47,7 @@ def csakd_losses(student, teacher, cross, variant="paper"):
     student, teacher, cross = student.float(), teacher.detach().float(), cross.float()
     dimension = math.sqrt(student.shape[1])
     similarity = (teacher.mean((2, 3)) * student.mean((2, 3))).sum(1) / dimension
+    # Varian paper dan kode penulis berbeda dalam attention, normalisasi, dan reduksi loss.
     if variant == "paper":
         attention = torch.softmax(teacher.relu() @ cross.relu().transpose(-2, -1), dim=-1) / dimension
         guided = student + attention @ student
@@ -94,6 +96,7 @@ class CSAKDModel(DistillationModel):
                 raise ValueError("CSAKD spatial mismatch; resizing is not allowed")
             inputs.append(align_channels(si.shape[1], ti.shape[1]))
             outputs.append(align_channels(so.shape[1], to.shape[1]))
+        # Adapter input/output dibuat sekali sebelum optimizer, lalu dipakai ulang tiap batch.
         self.projector = nn.ModuleDict({"input": nn.ModuleList(inputs), "output": nn.ModuleList(outputs)}).to(
             next(student_model.parameters()).device)
         self._teacher_feats.clear()
@@ -105,7 +108,8 @@ class CSAKDModel(DistillationModel):
         for position, (index, target) in enumerate(zip(self.feats_idx[:-1], targets, strict=True)):
             current = self.projector["output"][position](self._student_feats[index].float())
             incoming = self.projector["input"][position](self._student_feats[("input", index)].float())
-            cross = self.teacher_model.model[index](incoming)  # frozen module, autograd active
+            # Cross feature berasal dari input student; teacher beku, jalur gradient tetap aktif.
+            cross = self.teacher_model.model[index](incoming)
             terms.append(csakd_losses(current, target, cross, self.options["variant"]))
         return {"kd_agka_loss": sum(pair[0] for pair in terms), "kd_cross_loss": sum(pair[1] for pair in terms)}
 

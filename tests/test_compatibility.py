@@ -10,6 +10,7 @@ from inatrc_kd.kd import configure_kd
 from inatrc_kd.preflight import (
     INATRC_NAMES,
     _validate_runtime_requirements,
+    _validate_python_torch_pair,
     check_teacher,
     environment_report,
     inspect_model,
@@ -98,9 +99,49 @@ def test_active_cpu_environment():
     result = environment_report(device="cpu")
     assert result["torch_file"]
     assert result["tensor_probe_passed"] and result["torchvision_nms_passed"]
+    assert result["numpy_torch_bridge_passed"]
     assert result["resolved_device"] == "cpu"
     assert result["dependency_check_passed"]
     assert result["runtime_dependency_checks"]
+
+
+@pytest.mark.parametrize("python,torch_version,vision_version", [
+    ((3, 11), "2.4.1+cu121", "0.19.1+cu121"),
+    ((3, 12), "2.6.0+cu124", "0.21.0+cu124"),
+    ((3, 13), "2.7.1+cu126", "0.22.1+cu126"),
+    ((3, 13), "2.8.0+cu128", "0.23.0+cu128"),
+    ((3, 13), "2.10.0+cpu", "0.25.0+cpu"),
+    ((3, 13), "2.13.0+cu130", "0.28.0+cu130"),
+])
+def test_python_and_stable_cuda_cpu_pair_support(python, torch_version, vision_version):
+    assert _validate_python_torch_pair(torch_version, vision_version, python) == (
+        tuple(int(n) for n in torch_version.split(".")[:2]),
+        tuple(int(n) for n in vision_version.split(".")[:2]),
+    )
+
+
+@pytest.mark.parametrize("python,torch_version,vision_version,message", [
+    ((3, 10), "2.10.0", "0.25.0", "Supported Python"),
+    ((3, 14), "2.10.0", "0.25.0", "Supported Python"),
+    ((3, 13), "2.4.1", "0.19.1", "Python 3.13 requires"),
+    ((3, 13), "2.5.1", "0.20.1", "Python 3.13 requires"),
+    ((3, 13), "2.6.0", "0.21.0", "Python 3.13 requires"),
+    ((3, 13), "2.8.0", "0.22.0", "Unsupported Torch/torchvision pair"),
+    ((3, 13), "2.10.0.dev20251001+cu128", "0.25.0", "stable Torch"),
+    ((3, 13), "2.10.0", "0.25.0rc1", "stable Torch"),
+])
+def test_python_torch_pair_rejects_incompatible_or_unpinned_runtime(python, torch_version, vision_version, message):
+    with pytest.raises(RuntimeError, match=message):
+        _validate_python_torch_pair(torch_version, vision_version, python)
+
+
+def test_numpy_torch_abi_failure_stops_preflight(monkeypatch):
+    def incompatible(array):
+        raise RuntimeError("Numpy is not available")
+
+    monkeypatch.setattr(torch, "from_numpy", incompatible)
+    with pytest.raises(RuntimeError, match="Torch/torchvision/NumPy operation check failed"):
+        environment_report(device="cpu")
 
 
 @pytest.mark.parametrize("active_version", ["1.0", None])

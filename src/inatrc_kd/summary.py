@@ -1,4 +1,4 @@
-"""Collect completed runs without mixing smoke numbers into research results."""
+"""Gabungkan metrik run yang selesai ke CSV; hasil smoke disertakan hanya jika diminta."""
 from __future__ import annotations
 
 import json

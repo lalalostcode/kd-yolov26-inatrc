@@ -7,7 +7,7 @@ name = "inatrc-kd"
 version = "0.1.0"
 description = "Reproducible InaTRC YOLO26 knowledge distillation research and Stage B pilots"
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "ultralytics==8.4.155",
   "wandb==0.28.1",

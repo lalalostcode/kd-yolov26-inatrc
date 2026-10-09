@@ -1,4 +1,4 @@
-"""Shared custom lifecycle; official Native implementation stays untouched."""
+"""Alur bersama KD custom; implementasi Native resmi tetap dipakai apa adanya."""
 from __future__ import annotations
 import math
 import torch
@@ -48,10 +48,12 @@ def combined_loss(wrapper, batch, preds, weights):
             regular, items = wrapper.student_model.loss(batch, preds)
             parts = {key: regular.new_zeros(()) for key in weights}
         else:
+            # Teacher memberi target tetap; gradient hanya dipakai untuk melatih student.
             with torch.no_grad():
                 wrapper.teacher_model(batch["img"])
             preds = wrapper.student_model(batch["img"])
             regular, items = wrapper.student_model.loss(batch, preds)
+            # Hitung loss KD dalam FP32 agar tetap stabil saat training memakai AMP.
             with torch.autocast(device_type=batch["img"].device.type, enabled=False):
                 parts = wrapper.kd_loss()
         total = sum(parts[key] * weights[key] for key in weights)
@@ -61,5 +63,6 @@ def combined_loss(wrapper, batch, preds, weights):
         items["dis_loss"] = total.detach()
         return torch.cat((regular, total.reshape(1) * batch["img"].shape[0])), items
     finally:
+        # Lepas fitur batch ini agar hook tidak menahan graph atau memori batch berikutnya.
         wrapper._teacher_feats.clear()
         wrapper._student_feats.clear()

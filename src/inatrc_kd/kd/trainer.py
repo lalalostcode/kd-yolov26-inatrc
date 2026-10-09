@@ -1,4 +1,4 @@
-"""Wrap custom KD before optimizer/EMA construction, without global patching."""
+"""Pasang KD custom sebelum optimizer/EMA dibuat melalui trainer lokal."""
 from pathlib import Path
 import yaml
 from ultralytics.utils.torch_utils import unwrap_model
@@ -11,6 +11,7 @@ class CustomKDTrainer(SafeDetectionTrainer):
         if self.args.compile or self.args.resume:
             raise ValueError("Custom KD pilot does not support compile or resume")
         config = yaml.safe_load((Path(self.save_dir) / "resolved_config.yaml").read_text(encoding="utf-8"))
+        # Bungkus model di tahap ini agar adapter KD sudah terdaftar saat optimizer dibuat.
         if config["method"] == "crosskd":
             from .crosskd import CrossKDModel
             self.model = CrossKDModel(self.args.distill_model, self.model, config["kd"]["crosskd"])
@@ -24,6 +25,7 @@ class CustomKDTrainer(SafeDetectionTrainer):
         try:
             return super().train()
         finally:
+            # Bersihkan hook juga saat training gagal, supaya fitur lama tidak tertahan.
             model = unwrap_model(self.model)
             if hasattr(model, "_remove_feature_hooks"):
                 model._remove_feature_hooks()

@@ -1,7 +1,6 @@
-"""Read-only InaTRC audit and a source-preserving Ultralytics dataset loader.
+"""Audit gambar/label tanpa mengubah sumber; loader menyimpan cache di output.
 
-The synthetic fixture is diagnostic data, never an InaTRC replacement. Heavy
-Ultralytics imports happen only when ``SafeYOLODataset`` is requested.
+Data sintetis hanya untuk smoke. Ultralytics dimuat saat loader diperlukan.
 """
 
 from __future__ import annotations
@@ -86,7 +85,7 @@ def _verify_image(path: Path) -> None:
                 raise DatasetAuditError(f"Image dimensions must be at least 10 pixels: {path}")
             image_format = image.format
             image.verify()
-        # verify() checks structure; load() also forces the pixel decoder to run.
+        # verify() memeriksa struktur file; load() memastikan piksel bisa dibaca.
         with Image.open(path) as image:
             image.load()
         if image_format == "JPEG":
@@ -125,6 +124,7 @@ def _label_rows(path: Path, *, class_count: int = 5) -> tuple[bytes, list[tuple[
         if not all(math.isfinite(value) for value in row):
             raise DatasetAuditError(f"{location}: non-finite label value")
         cls, x, y, width, height = row
+        # Format YOLO: class_id, pusat x/y, lebar/tinggi; koordinat relatif 0..1.
         if not cls.is_integer() or not 0 <= cls < class_count:
             raise DatasetAuditError(f"{location}: invalid class ID {cls}; expected 0..{class_count - 1}")
         if not (
@@ -192,6 +192,7 @@ def audit_dataset(
             _verify_image(image)
             image_hash = _sha256_file(image)
             label_bytes, rows = _label_rows(label)
+            # Fingerprint berubah jika nama, isi gambar, atau anotasi berubah.
             fingerprint.update(f"{split}/{image.name}\n{image_hash}\n{label.name}\n".encode())
             fingerprint.update(label_bytes)
             occurrences[image_hash].append({"split": split, "image": image.name})
@@ -291,7 +292,7 @@ def create_synthetic_dataset(root: str | Path, seed: int = 42) -> Path:
             image = Image.new("RGB", (64, 64), tuple(rng.randrange(24, 80) for _ in range(3)))
             draw = ImageDraw.Draw(image)
             draw.rectangle((16, 16, 47, 47), fill=tuple(rng.randrange(128, 256) for _ in range(3)))
-            # Unique exact bytes even if the random colors happened to collide.
+            # Piksel penanda memastikan setiap gambar sintetis memiliki isi unik.
             image.putpixel((0, 0), (index, seed % 256, 255 - index))
             name = f"synthetic_{index:03d}"
             image.save(image_dir / f"{name}.png")
@@ -336,7 +337,7 @@ def __getattr__(name: str) -> Any:
                 content_digest.update(image_name.encode())
                 content_digest.update(_sha256_file(image_path).encode())
                 content_digest.update(raw)
-            # Content-addressing also avoids trusting size-only upstream cache hashes.
+            # Nama cache berdasarkan isi file; cache lama tidak lolos saat isi berubah.
             redirected = self.audit_cache_dir / f"{content_digest.hexdigest()}.cache"
             cache, exists = super()._load_or_scan_cache(redirected, cache_hash)
             found, missing, empty, corrupt, total = cache["results"]

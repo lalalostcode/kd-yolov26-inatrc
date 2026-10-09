@@ -1,7 +1,6 @@
-"""Small isolated Ultralytics extensions to keep caches outside source data.
+"""Ekstensi kecil trainer/validator Ultralytics: cache di output dan protokol tetap.
 
-Dataset constructor arguments follow the pinned upstream build_yolo_dataset;
-the detector, optimizer, losses and Native KD remain upstream implementations.
+Detector, optimizer, loss deteksi, dan mekanisme Native KD memakai Ultralytics.
 """
 from __future__ import annotations
 
@@ -16,6 +15,7 @@ from .data import SafeYOLODataset
 
 
 def safe_dataset(args, img_path, batch, data, *, mode, stride, cache_dir):
+    # Loader harus menerima seluruh data yang diaudit; test tidak masuk evaluasi.
     if args.fraction != 1.0 or args.classes is not None or args.single_cls:
         raise ValueError("Stage A requires all audited images/classes; filtering is disabled")
     if Path(str(img_path)).resolve() == (Path(data["path"]) / "test" / "images").resolve():
@@ -41,9 +41,7 @@ class SafeDetectionTrainer(DetectionTrainer):
     def run_callbacks(self, event: str):
         super().run_callbacks(event)
         if event == "on_train_epoch_start":
-            # v8.4.155 only retries OOM when this counter is below three.
-            # Set it after upstream initializes it, before any forward/backward.
-            # Thus OOM raises before upstream can halve the explicit batch.
+            # Pada v8.4.155, nilai 3 mematikan retry OOM yang bisa mengecilkan batch.
             self._oom_retries = 3
 
     def _build_train_pipeline(self):

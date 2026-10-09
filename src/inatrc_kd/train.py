@@ -1,4 +1,4 @@
-"""Execute one teacher/baseline/KD experiment with explicit provenance."""
+"""Alur utama: cek environment/data → training → muat best.pt → evaluasi → simpan hasil."""
 from __future__ import annotations
 
 import json
@@ -27,6 +27,7 @@ from .tracking import EpochRecorder, ExperimentTracker
 
 def run_experiment(config: dict) -> dict:
     validate_config(config)
+    # Logging W&B hanya melalui tracker manual, agar tidak terbentuk dua run.
     settings.update({"wandb": False})
     output = Path(config["output_root"])
     scale = "m" if config["stage"] == "teacher" else config["student"]
@@ -54,6 +55,7 @@ def run_experiment(config: dict) -> dict:
             actual_audit = audit_dataset(config["dataset"]["root"], run_dir / "reports" / "inatrc",
                                          expected_images=config["dataset"]["expected_images"])
             metadata["inatrc_dataset_fingerprint"] = actual_audit["fingerprint"]
+        # Smoke selalu memakai data buatan; dataset asli yang terpasang tetap diaudit.
         if config["mode"] == "smoke":
             data_root = create_synthetic_dataset(run_dir / "synthetic_data", seed=config["seed"])
             audit = audit_dataset(data_root, run_dir / "reports" / "training_data", expected_images=20)
@@ -66,6 +68,7 @@ def run_experiment(config: dict) -> dict:
         config["dataset_fingerprint"] = audit["fingerprint"]
         data_yaml = write_runtime_yaml(data_root, run_dir / "data_runtime.yaml")
         init_seeds(config["seed"], deterministic=config["training"]["deterministic"])
+        # Teacher acak hanya alat diagnosis smoke, bukan teacher penelitian.
         if config["method"] != "none" and config["mode"] == "smoke" and not config["kd"]["teacher_checkpoint"]:
             config["kd"]["teacher_checkpoint"] = str(make_synthetic_teacher(run_dir / "diagnostic_teacher.pt", seed=config["seed"]))
         kd_args = configure_kd(config)
@@ -90,6 +93,7 @@ def run_experiment(config: dict) -> dict:
                       "conf": config["evaluation"]["conf"], "iou": config["evaluation"]["iou"],
                       "max_det": config["evaluation"]["max_det"], "augment": False}
         config["ultralytics_effective_config"] = vars(get_cfg(overrides=train_args))
+        # Simpan parameter yang benar-benar dipakai, termasuk default dari Ultralytics.
         (run_dir / "resolved_config.yaml").write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
         write_json(run_dir / "metadata.json", metadata)
         tracker.start(metadata)
@@ -97,6 +101,7 @@ def run_experiment(config: dict) -> dict:
         recorder.attach(model)
 
         def record_runtime_initialization(trainer):
+            # Hash awal membantu membandingkan inisialisasi antar eksperimen.
             runtime = unwrap_model(trainer.model)
             student = getattr(runtime, "student_model", runtime)
             metadata["initial_student_state_sha256"] = _state_hash(student)
@@ -113,6 +118,7 @@ def run_experiment(config: dict) -> dict:
         else:
             torch.cuda.reset_peak_memory_stats()
         training_started = time.perf_counter()
+        # Teacher/baseline/Native berbagi trainer; custom KD hanya mengganti bagian KD.
         trainer = SafeDetectionTrainer
         if config["method"] in ("crosskd", "csakd"):
             from .kd.trainer import CustomKDTrainer
@@ -149,7 +155,7 @@ def run_experiment(config: dict) -> dict:
             if saved_args[key] != config["training"][key]:
                 raise RuntimeError(f"Training protocol changed: {key}")
         metrics = evaluate_checkpoint(run_dir / "weights" / "best.pt", data_yaml, run_dir, config)
-        # Detect source mutation after training, while never evaluating the test split.
+        # Audit ulang memastikan training tidak mengubah isi dataset sumber.
         after = audit_dataset(data_root, expected_images=audit["total_images"])
         if after["fingerprint"] != audit["fingerprint"]:
             raise RuntimeError("Dataset bytes changed during the experiment")

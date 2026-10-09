@@ -218,8 +218,33 @@ def test_runner_preserves_kaggle_torch_and_uses_explicit_uv_environment(notebook
     assert "UV_PYTHON_DOWNLOADS" in source and '"never"' in source
     assert "KERNEL_TORCH" in source and 'active_torch["torch_file"]' in source
     assert 'active_torch["torch_version"]' in source
+    assert 'active_torch["torchvision_file"]' in source
+    assert 'active_torch["torchvision_version"]' in source
+    assert 'active_torch["python"]' in source
     assert "uv==0.9.8" in source
     assert "pip install torch" not in source
+
+
+@pytest.mark.parametrize("version,accepted", [
+    ((3, 10), False), ((3, 11), True), ((3, 12), True), ((3, 13), True), ((3, 14), False),
+])
+def test_runner_and_metadata_agree_on_python_support(notebook, version, accepted):
+    import tomllib
+    from packaging.specifiers import SpecifierSet
+
+    supported = SpecifierSet(tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["requires-python"])
+    locked = SpecifierSet(tomllib.loads((REPO_ROOT / "uv.lock").read_text())["requires-python"])
+    assert supported.contains(".".join(map(str, version))) is accepted
+    assert locked.contains(".".join(map(str, version))) is accepted
+    assertion = next(node for source in _code(notebook) for node in ast.walk(ast.parse(source))
+                     if isinstance(node, ast.Assert) and any(isinstance(part, ast.Attribute)
+                         and part.attr == "version_info" for part in ast.walk(node)))
+    check = compile(ast.Module(body=[assertion], type_ignores=[]), "runner-python-guard", "exec")
+    if accepted:
+        exec(check, {"sys": types.SimpleNamespace(version_info=version)})
+    else:
+        with pytest.raises(AssertionError):
+            exec(check, {"sys": types.SimpleNamespace(version_info=version)})
 
 
 def test_runner_launches_exactly_one_package_experiment(notebook):

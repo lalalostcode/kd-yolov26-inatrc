@@ -1,4 +1,4 @@
-"""YOLO26 CrossKD adaptation: intermediate student head -> frozen teacher suffix."""
+"""Adaptasi CrossKD YOLO26: fitur head student melewati suffix teacher yang beku."""
 from __future__ import annotations
 
 import torch
@@ -37,7 +37,7 @@ def decoded_xyxy(raw_boxes, features, strides):
 
 
 def aligned_giou(pred, target):
-    # Ordering is only for the KD geometry; detection predictions/GT loss stay unchanged.
+    # Urutkan sudut hanya untuk geometri KD; loss deteksi asli tetap memakai prediksi awal.
     p0, p1 = torch.minimum(pred[..., :2], pred[..., 2:]), torch.maximum(pred[..., :2], pred[..., 2:])
     t0, t1 = torch.minimum(target[..., :2], target[..., 2:]), torch.maximum(target[..., :2], target[..., 2:])
     ap, at = (p1 - p0).prod(-1), (t1 - t0).prod(-1)
@@ -59,6 +59,7 @@ class CrossKDModel(DistillationModel):
                 if source.shape[-2:] != target.shape[-2:]:
                     raise ValueError("CrossKD spatial mismatch; resizing is not allowed")
                 adapters[f"{branch}_{level}"] = align_channels(source.shape[1], target.shape[1])
+        # Daftarkan adapter sejak awal supaya parameternya ikut optimizer student.
         self.projector = nn.ModuleDict(adapters).to(next(student_model.parameters()).device)
         self._student_feats.clear()
         self._teacher_feats.clear()
@@ -79,6 +80,7 @@ class CrossKDModel(DistillationModel):
 
     def kd_loss(self):
         head = detect_head(self.teacher_model)
+        # one2many menjaga jalur gradient ke fitur student; input one2one YOLO26 ter-detach.
         target = self.decouple_outputs(self._teacher_feats[self.feats_idx[-1]], branch="one2many")
         outputs = {}
         for name, blocks in (("box", head.cv2), ("cls", head.cv3)):
@@ -86,7 +88,7 @@ class CrossKDModel(DistillationModel):
             for level, block in enumerate(blocks):
                 feature = self.projector[f"{name}_{level}"](self._student_feats[(name, level)].float())
                 feature = scale_align(feature, self._teacher_feats[(name, level)])
-                # Teacher frozen/eval, with autograd active through its suffix.
+                # Bobot teacher tetap beku, tetapi gradient melewati suffix menuju student.
                 for layer in list(block.children())[1:]:
                     feature = layer(feature)
                 parts.append(feature.flatten(2))

@@ -4,7 +4,7 @@ Repository skripsi dengan fondasi Tahap A dan **implementasi/pilot Tahap B**: au
 
 Audit referensi awal ada dalam [docs/audit.md](docs/audit.md). Native memakai API resmi Ultralytics; CrossKD/CSAKD memakai adaptasi yang dijelaskan di [desain Tahap B](docs/stage_b_design.md). Default CSAKD mengikuti persamaan paper; varian fungsi loss kode penulis tersedia secara eksplisit. Bobot KD custom masih bobot pilot, belum konfigurasi final InaTRC. Hasil terkini ada dalam [laporan Tahap B](docs/stage_b_report.md).
 
-Verifikasi lokal terbaru: **143 test passed, 3 skipped** (CUDA/AMP GPU tidak tersedia). Smoke baseline/Native/CrossKD/CSAKD pada s dan n menghasilkan `best.pt` yang dimuat ulang dan divalidasi, dengan parameter/FLOPs inference tetap sama per ukuran. Dataset InaTRC asli, GPU Kaggle, dan layanan W&B online belum diuji. [Laporan Tahap A](docs/stage_a_report.md) dipertahankan sebagai catatan historis; hasil dan batas verifikasi terkini ada dalam [laporan Tahap B](docs/stage_b_report.md).
+Verifikasi Python 3.13 terbaru: **173 test passed, 3 skipped** (CUDA/AMP GPU tidak tersedia). Smoke baseline/Native/CrossKD/CSAKD pada s dan n menghasilkan `best.pt` yang dimuat ulang dan divalidasi. Dataset InaTRC asli, GPU Kaggle, dan layanan W&B online belum diuji. Detail environment, perubahan lock, dan strategi mempertahankan CUDA kernel ada di [laporan Python 3.13](docs/python313_compatibility.md). [Laporan Tahap A](docs/stage_a_report.md) dan [laporan Tahap B](docs/stage_b_report.md) dipertahankan sebagai catatan hasil sebelumnya.
 
 ## Struktur
 
@@ -20,9 +20,11 @@ pyproject.toml · uv.lock    environment dan dependency terkunci
 
 Output setiap eksperimen ada dalam direktori unik di `outputs/`, dengan identitas stage/model/method/seed/mode. Training yang berhasil menyimpan `best.pt`, `results.csv`, metrik agregat dan AP per kelas, resolved config, metadata environment/source, dan ringkasan run. `latest_run.json` hanya menunjuk run terakhir; hasil run lama tidak ditimpa.
 
+Untuk membaca kode, mulai dari `cli.py → config.py → train.py → evaluate.py`. Notebook hanya menyiapkan environment dan memanggil CLI. `data.py` memeriksa gambar/label, `preflight.py` memeriksa environment/model, dan `pipeline.py` menghubungkan loader dengan Ultralytics. `tracking.py` mencatat hasil; `summary.py` merekap beberapa run; `io.py` menyediakan helper file/hash. Folder `kd/` memisahkan algoritme KD dari alur training. Docstring di awal setiap file dan komentar pada langkah penting menjelaskan perannya secara singkat.
+
 ## Setup Windows PowerShell
 
-Gunakan Python 3.11/3.12. Versi lokal default berada di `.python-version`. Tidak perlu aktivasi venv manual.
+Gunakan Python 3.11/3.12/3.13. Default lokal tetap 3.12 di `.python-version`; runner memakai interpreter kernel Kaggle/Colab. Tidak perlu aktivasi venv manual.
 
 ```powershell
 # Sekali saja bila uv belum terpasang:
@@ -58,7 +60,7 @@ Lock memilih Torch/Torchvision **CPU** secara eksplisit untuk verifikasi lokal; 
 4. Run All mem-bootstrap uv melalui interpreter kernel, menyiapkan venv, memeriksa CUDA/dependency, lalu menjalankan **satu** eksperimen.
 5. Lihat `best.pt` dan metrics pada cell terakhir. Simpan melalui **Save Version** atau W&B artifact; filesystem sesi Kaggle tidak permanen.
 
-Untuk Colab, gunakan notebook yang sama: uncomment empat assignment pada blok `COLAB PATHS` di cell konfigurasi, aktifkan GPU melalui Runtime → Change runtime type, lalu isi `REPO_URL` + `REPO_COMMIT` atau snapshot. Upload input ke `/content/inputs`; blok `COLAB DRIVE` yang dikomentari dapat dipakai jika input ada di Google Drive. Jika W&B online, buat secret `WANDB_API_KEY` di panel 🔑 Secrets, aktifkan Notebook access, dan uncomment dua baris pada blok `COLAB SECRET` di cell Secrets. Setup uv, pemeriksaan Torch, dan pipeline tetap dipakai bersama. Output default `/content/outputs` harus diunduh/disalin ke Drive sebelum sesi berakhir. Python kernel harus 3.11/3.12; incompatibility tetap gagal eksplisit. Blok Colab diuji lokal dengan mock Secrets, bukan pada runtime GPU Colab nyata. API Secrets mengikuti [source resmi Colab](https://github.com/googlecolab/colabtools/blob/main/google/colab/userdata.py).
+Untuk Colab, gunakan notebook yang sama: uncomment empat assignment pada blok `COLAB PATHS` di cell konfigurasi, aktifkan GPU melalui Runtime → Change runtime type, lalu isi `REPO_URL` + `REPO_COMMIT` atau snapshot. Upload input ke `/content/inputs`; blok `COLAB DRIVE` yang dikomentari dapat dipakai jika input ada di Google Drive. Jika W&B online, buat secret `WANDB_API_KEY` di panel 🔑 Secrets, aktifkan Notebook access, dan uncomment dua baris pada blok `COLAB SECRET` di cell Secrets. Setup uv, pemeriksaan Torch, dan pipeline tetap dipakai bersama. Output default `/content/outputs` harus diunduh/disalin ke Drive sebelum sesi berakhir. Python kernel harus 3.11/3.12/3.13; incompatibility tetap gagal eksplisit. Blok Colab diuji lokal dengan mock Secrets, bukan pada runtime GPU Colab nyata. API Secrets mengikuti [source resmi Colab](https://github.com/googlecolab/colabtools/blob/main/google/colab/userdata.py).
 
 Dataset menggunakan layout asli `ROOT/{train,val,test}/{images,labels}`. Audit mencatat pasangan file, kelas, bbox YOLO lima kolom, label kosong, distribusi, fingerprint, dan duplikasi byte identik lintas split. Polygon/format lain atau data tidak valid menyebabkan kegagalan jelas. Tidak ada konversi, relabel, penghapusan, atau split ulang otomatis. Jumlah referensi 3.250 gambar dikonfigurasi di `configs/dataset.yaml`. Pemeriksaan hash tidak membuktikan tidak adanya kebocoran temporal.
 
@@ -73,7 +75,9 @@ uv run --frozen --no-sync --python <interpreter-kernel> python -m inatrc_kd pref
 uv run --frozen --no-sync --python <interpreter-kernel> python -m inatrc_kd run ...
 ```
 
-Torch/Torchvision CUDA preinstalled diwarisi sebagai pengecualian lock yang eksplisit; versi aktifnya boleh berbeda dari pasangan CPU lokal terkunci jika masih memenuhi dependency proyek dan pasangan versi resmi yang kompatibel. Paket lain mengikuti lock. **Jangan hilangkan `--no-sync` dari pemanggilan Kaggle setelah setup**: sync otomatis dapat memasang Torch CPU dari lock. Runner membandingkan lokasi/versi Torch sebelum dan setelah setup. Preflight memeriksa pasangan versi serta dependency wajib `Requires-Dist` Torch/Torchvision yang benar-benar aktif, lalu melakukan operasi CUDA kecil dan pemeriksaan Torchvision, bukan hanya `cuda.is_available()`. Ketidakcocokan dependency/CUDA/ABI/OOM menyebabkan kegagalan jelas; runner tidak mengganti wheel Torch atau menurunkan batch otomatis.
+Torch/Torchvision CUDA preinstalled diwarisi sebagai pengecualian lock yang eksplisit; versi aktifnya boleh berbeda dari pasangan CPU lokal terkunci jika masih memenuhi dependency proyek dan pasangan versi resmi yang kompatibel. Paket lain mengikuti lock. **Jangan hilangkan `--no-sync` dari pemanggilan Kaggle setelah setup**: sync otomatis dapat memasang Torch CPU dari lock. Runner membandingkan lokasi/versi Torch dan torchvision serta versi Python sebelum dan setelah setup. Preflight memeriksa pasangan versi serta dependency wajib `Requires-Dist` Torch/Torchvision yang benar-benar aktif, lalu melakukan operasi CUDA kecil, torchvision NMS, dan konversi NumPy ↔ Torch, bukan hanya `cuda.is_available()`. Ketidakcocokan dependency/CUDA/ABI/OOM menyebabkan kegagalan jelas; runner tidak mengganti wheel Torch atau menurunkan batch otomatis.
+
+**Python 3.13:** menurut [tabel resmi torchvision](https://github.com/pytorch/vision#installation), gunakan Torch ≥2.7 dengan pasangan torchvision ≥0.22 yang sesuai. Torch 2.4–2.6 hanya diterima pada Python 3.11/3.12; nightly/prerelease tidak diterima. Lock CPU tetap Torch 2.10.0/torchvision 0.25.0, dengan wheel CPython 3.13. Strategi ini mempertahankan ABI kernel; mengganti kernel ke 3.12 sambil memakai wheel CPython 3.13 tidak didukung. Jika notebook lama masih berhenti pada batas 3.12, perbarui notebook **dan** snapshot/commit repository yang berisi `pyproject.toml`, `uv.lock`, serta `src` terbaru. Gunakan sesi baru untuk menghindari venv/source lama.
 
 Kaggle GPU **belum dinyatakan teruji** oleh verifikasi lokal. Lock lintas environment tidak menjamin kompatibilitas CUDA. Python, dependency aktif, GPU, CUDA, hash lock, dan commit/fingerprint source dicatat.
 

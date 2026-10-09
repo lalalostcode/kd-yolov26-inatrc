@@ -1,4 +1,4 @@
-"""Resolve the four simple YAML configurations and explicit CLI overrides."""
+"""Gabungkan YAML di configs/ dengan pilihan pengguna; periksa sebelum training."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def validate_output_location(output_root: str | Path, dataset_root: str | Path | None) -> None:
-    """Reject source-data writes before creating settings, caches or reports."""
+    """Cegah output/cache ditulis ke dalam dataset asli."""
     if dataset_root is None:
         return
     output = Path(output_root).expanduser().resolve()
@@ -29,6 +29,7 @@ def load_config(*, config_dir: str | Path | None = None, stage: str = "student",
     sections = {name: yaml.safe_load((directory / f"{name}.yaml").read_text(encoding="utf-8"))
                 for name in ("dataset", "training", "kd", "tracking")}
     presets = sections.pop("training")
+    # Smoke memakai preset full sebagai dasar, lalu menimpa parameter dengan nilai ringan.
     training = deepcopy(presets["full"])
     if mode == "smoke":
         training.update(presets["smoke"])
@@ -49,6 +50,7 @@ def load_config(*, config_dir: str | Path | None = None, stage: str = "student",
     if config["tracking"]["upload_checkpoint_each_epoch"]:
         config["training"]["save_period"] = 1
     config["training"]["seed"] = seed
+    # YAML berarti model acak untuk diagnosis; .pt berarti pretrained untuk penelitian.
     config["model"] = f"yolo26{'m' if stage == 'teacher' else student}.{'yaml' if mode == 'smoke' else 'pt'}"
     if weights is not None:
         if mode != "full":

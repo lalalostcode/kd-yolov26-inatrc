@@ -1,4 +1,4 @@
-"""Synthetic custom-KD-only gradient/optimizer/hook checks for Stage B."""
+"""Diagnosis custom KD pada data sintetis: cek gradient, optimizer, dan pembersihan hook."""
 from __future__ import annotations
 import torch
 from inatrc_kd.config import load_config
@@ -45,7 +45,8 @@ def custom_gradient_probe(method, student="n", imgsz=160, device="cpu", amp=Fals
                 loss, items = wrapper(_batch(imgsz, selected))
             if not bool(torch.isfinite(loss).all()) or float(items["dis_loss"]) <= 0:
                 raise RuntimeError("Custom diagnostic needs finite detection and positive KD loss")
-            scaler.scale(loss[-1]).backward()  # KD alone must train the student; GT loss cannot hide a broken route.
+            # Uji loss KD saja, agar loss deteksi tidak menyamarkan gradient KD yang terputus.
+            scaler.scale(loss[-1]).backward()
             if enabled:
                 scaler.unscale_(optimizer)
             student_grad = _gradient_summary(wrapper.student_model.parameters())

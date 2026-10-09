@@ -1,4 +1,4 @@
-"""One optional manual W&B run; epoch accounting also works completely offline."""
+"""Catat epoch/best checkpoint ke file lokal dan, bila aktif, satu run W&B."""
 from __future__ import annotations
 
 import math
@@ -35,6 +35,7 @@ class ExperimentTracker:
         if wandb.run is not None:
             raise RuntimeError("An existing W&B run is active; refusing a duplicate run")
         if self.config["tracking"]["mode"] == "online":
+            # Runner meneruskan secret lewat environment, bukan melalui konfigurasi YAML.
             key = os.getenv("WANDB_API_KEY")
             if not key:
                 raise RuntimeError("W&B online requires WANDB_API_KEY from environment or Kaggle Secrets")
@@ -109,7 +110,7 @@ class ExperimentTracker:
 
 
 class EpochRecorder:
-    """Track actual saved epochs, including when save_period=-1 and W&B is disabled."""
+    """Catat epoch dan best epoch meski W&B dan checkpoint tiap epoch dimatikan."""
     def __init__(self, config: dict, run_dir: Path, tracker: ExperimentTracker):
         self.config, self.run_dir, self.tracker = config, run_dir, tracker
         self.last_saved_epoch = 0
@@ -143,7 +144,7 @@ class EpochRecorder:
     def on_fit_epoch_end(self, trainer) -> None:
         epoch = int(trainer.epoch + 1)
         if epoch != self.last_saved_epoch or epoch <= self.last_logged_epoch:
-            return  # final_eval emits this event a second time
+            return  # Validasi final memanggil callback lagi; epoch cukup dicatat sekali.
         values = {"epoch": epoch}
         for group in (trainer.label_loss_items(trainer.tloss, prefix="train"), trainer.metrics or {}, trainer.lr or {}):
             for key, value in group.items():

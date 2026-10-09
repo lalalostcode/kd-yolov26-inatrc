@@ -1,4 +1,4 @@
-"""Reload a checkpoint and evaluate the fixed validation protocol only."""
+"""Muat ulang best.pt dan hitung metrik pada val dengan protokol yang tetap."""
 from __future__ import annotations
 
 import math
@@ -24,6 +24,7 @@ def evaluate_checkpoint(checkpoint: str | Path, data_yaml: str | Path, run_dir: 
     evaluation, training = config["evaluation"], config["training"]
     if evaluation["split"] != "val" or evaluation["nms"] is not None:
         raise ValueError("Only the fixed val/nms=None protocol is available in Stage A")
+    # Evaluasi model tersimpan secara mandiri; teacher/adapter KD tidak diperlukan.
     model = YOLO(str(checkpoint))
     native = model.model
     head = native.model[-1]
@@ -35,7 +36,7 @@ def evaluate_checkpoint(checkpoint: str | Path, data_yaml: str | Path, run_dir: 
              "size_mb": checkpoint.stat().st_size / 1e6,
              "parameters": sum(parameter.numel() for parameter in native.parameters()),
              "nc": int(head.nc), "teacher_present": False, "projector_present": False}
-    # Preserve an unfused copy before the validator builds its inference backend.
+    # Salinan sebelum fusion menjaga penghitungan FLOPs memakai model checkpoint asli.
     complexity_probe = deepcopy(native).float().eval()
     result = model.val(
         validator=SafeDetectionValidator, data=str(data_yaml), split="val",
@@ -60,6 +61,7 @@ def evaluate_checkpoint(checkpoint: str | Path, data_yaml: str | Path, run_dir: 
     ap = np.asarray(box.all_ap)
     for class_id, name in enumerate(config["dataset"]["names"]):
         position = indices.get(class_id)
+        # Kelas tanpa AP valid tetap null, agar tidak dianggap memperoleh nilai nol.
         row = {"class_id": class_id, "class_name": name,
                **dict.fromkeys(("precision", "recall", "AP50", "AP75", "AP50_95"))}
         if position is not None:

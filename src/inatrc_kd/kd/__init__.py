@@ -1,10 +1,10 @@
-"""Small, explicit gates for supported knowledge-distillation methods."""
+"""Pilih metode KD dan periksa teacher; implementasi tiap metode ada di file terpisah."""
 
 from __future__ import annotations
 
 
 def configure_kd(config: dict) -> dict:
-    """Validate method/teacher and return pinned trainer kwargs without baseline fallback."""
+    """Kembalikan argumen training KD; pilihan yang salah harus gagal secara jelas."""
     method = config.get("method", "none")
     if method == "none":
         return {}

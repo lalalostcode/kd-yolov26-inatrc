@@ -1,4 +1,4 @@
-"""Read-only environment/model checks and explicitly synthetic KD diagnostics."""
+"""Periksa dependency/GPU serta bentuk output dan gradient model sebelum training."""
 
 from __future__ import annotations
 
@@ -77,6 +77,32 @@ def _validate_runtime_requirements(packages=("torch", "torchvision")) -> list[di
     return checked
 
 
+def _validate_python_torch_pair(torch_version: str, vision_version: str, python_version=None):
+    """Periksa pasangan resmi Torch/torchvision beserta dukungan versi Python."""
+    from packaging.version import Version
+
+    python_version = tuple(python_version or sys.version_info[:2])
+    if not (3, 11) <= python_version < (3, 14):
+        raise RuntimeError(f"Supported Python versions are 3.11, 3.12 and 3.13; found {python_version}.")
+    torch_release, vision_release = Version(torch_version), Version(vision_version)
+    torch_pair, vision_pair = torch_release.release[:2], vision_release.release[:2]
+    if (torch_release.is_prerelease or torch_release.is_devrelease
+            or vision_release.is_prerelease or vision_release.is_devrelease
+            or torch_pair[0] != 2 or not 4 <= torch_pair[1] <= 13
+            or vision_pair != (0, torch_pair[1] + 15)):
+        raise RuntimeError(
+            f"Unsupported Torch/torchvision pair: {torch_version}/{vision_version}. "
+            "Require stable Torch 2.4 through 2.13 with torchvision 0.19 through 0.28 respectively."
+        )
+    # Tabel resmi torchvision membatasi pasangan 2.4–2.6 sampai Python 3.12.
+    if python_version >= (3, 13) and torch_pair < (2, 7):
+        raise RuntimeError(
+            f"Python 3.13 requires Torch >=2.7 and torchvision >=0.22; found {torch_version}/{vision_version}. "
+            "Use a compatible preinstalled runtime; do not automatically replace CUDA wheels."
+        )
+    return torch_pair, vision_pair
+
+
 def environment_report(device: str = "cpu", require_gpu: bool = False) -> dict[str, Any]:
     """Check the active interpreter, Torch/CUDA, and torchvision NMS on the requested device."""
     import torch
@@ -94,18 +120,10 @@ def environment_report(device: str = "cpu", require_gpu: bool = False) -> dict[s
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
-    if not ((3, 11) <= sys.version_info[:2] < (3, 13)):
-        raise RuntimeError(f"Supported Python versions are 3.11 and 3.12; found {platform.python_version()}.")
+    torch_pair, vision_pair = _validate_python_torch_pair(torch.__version__, torchvision.__version__)
     for package, expected in (("ultralytics", "8.4.155"), ("wandb", "0.28.1")):
         if versions[package] != expected:
             raise RuntimeError(f"Expected {package}=={expected}; active version is {versions[package]!r}.")
-    torch_pair = tuple(int(part) for part in torch.__version__.split(".")[:2])
-    vision_pair = tuple(int(part) for part in torchvision.__version__.split(".")[:2])
-    if torch_pair[0] != 2 or not 4 <= torch_pair[1] <= 13 or vision_pair != (0, torch_pair[1] + 15):
-        raise RuntimeError(
-            f"Unsupported Torch/torchvision pair: {torch.__version__}/{torchvision.__version__}. "
-            "Require Torch 2.4 through 2.13 with torchvision 0.19 through 0.28 respectively."
-        )
     requirement_checks = _validate_runtime_requirements()
     report: dict[str, Any] = {
         "python": platform.python_version(),
@@ -143,6 +161,8 @@ def environment_report(device: str = "cpu", require_gpu: bool = False) -> dict[s
                 }
             )
     try:
+        # Jalankan operasi sungguhan; CUDA terdeteksi saja belum menjamin wheel cocok.
+        import numpy as np
         probe = torch.tensor([1.0, 2.0], device=selected)
         result = float(probe.square().sum().cpu())
         boxes = torch.tensor([[0.0, 0.0, 2.0, 2.0], [0.0, 0.0, 1.0, 1.0]], device=selected)
@@ -150,14 +170,21 @@ def environment_report(device: str = "cpu", require_gpu: bool = False) -> dict[s
         kept = torchvision.ops.nms(boxes, scores, 0.5).cpu().tolist()
         if result != 5.0 or kept != [0, 1]:
             raise RuntimeError(f"Unexpected tensor/NMS output: {result}, {kept}")
+        # Loader memakai NumPy ↔ Torch; periksa ABI setelah dependency venv terpasang.
+        array = np.array([1.0, 2.0], dtype=np.float32)
+        roundtrip = torch.from_numpy(array).to(selected).square().cpu().numpy()
+        if not np.array_equal(roundtrip, np.array([1.0, 4.0], dtype=np.float32)):
+            raise RuntimeError("Unexpected NumPy/Torch roundtrip output")
         if selected.type == "cuda":
             torch.cuda.synchronize(selected)
         report["tensor_probe_passed"] = True
         report["torchvision_nms_passed"] = True
+        report["numpy_torch_bridge_passed"] = True
     except Exception as exc:
         raise RuntimeError(
-            f"Torch/torchvision operation check failed on {selected}. "
-            f"Torch {torch.__version__}, torchvision {torchvision.__version__}, CUDA {torch.version.cuda}."
+            f"Torch/torchvision/NumPy operation check failed on {selected}. "
+            f"Torch {torch.__version__}, torchvision {torchvision.__version__}, "
+            f"NumPy {versions['numpy']}, CUDA {torch.version.cuda}."
         ) from exc
     return report
 
@@ -229,6 +256,7 @@ def inspect_model(
         features[:] = [list(feature.shape) for feature in inputs[0]]
 
     original_hooks = len(head._forward_pre_hooks)
+    # Hook mengamati fitur P3/P4/P5 yang benar-benar masuk ke head Detect.
     handle = head.register_forward_pre_hook(capture_inputs)
     try:
         model.train()

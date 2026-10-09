@@ -1,6 +1,9 @@
 """CLI and static Kaggle runner acceptance checks; never execute a notebook."""
 
 import ast
+import os
+from pathlib import Path
+import subprocess
 import sys
 import types
 import nbformat
@@ -223,6 +226,64 @@ def test_runner_preserves_kaggle_torch_and_uses_explicit_uv_environment(notebook
     assert 'active_torch["python"]' in source
     assert "uv==0.9.8" in source
     assert "pip install torch" not in source
+
+
+def test_git_download_fetches_only_requested_commit_and_reuses_checkout(notebook, tmp_path):
+    # Exercise the actual notebook Git block against a local URL; no GitHub/network/push.
+    tree = ast.parse(next(source for source in _code(notebook) if "def source_files" in source))
+    selected = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.UnaryOp) and isinstance(node.test.op, ast.Not)
+                    and isinstance(node.test.operand, ast.Call)
+                    and isinstance(node.test.operand.func, ast.Attribute)
+                    and node.test.operand.func.attr == "exists"
+                    and isinstance(node.test.operand.func.value, ast.Name)
+                    and node.test.operand.func.value.id == "REPO")
+    commit = subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    checkout = tmp_path / "checkout"
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return subprocess.run(command, **kwargs)
+
+    namespace = {"REPO": checkout, "REPO_URL": REPO_ROOT.as_uri(), "REPO_COMMIT": commit,
+                 "subprocess": types.SimpleNamespace(run=run)}
+    code = compile(ast.Module(body=[selected], type_ignores=[]), "runner-git", "exec")
+    exec(code, namespace)
+    assert [command[1] for command in commands] == ["init", "fetch", "checkout"]
+    fetch = commands[1]
+    assert "--no-tags" in fetch and "--depth" in fetch
+    assert fetch[fetch.index("--depth") + 1] == "1"
+    assert fetch[-1] == commit
+    assert subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip() == commit
+    assert subprocess.check_output(["git", "-C", str(checkout), "rev-list", "--count", "HEAD"], text=True).strip() == "1"
+    assert subprocess.check_output(["git", "-C", str(checkout), "remote"], text=True).strip() == ""
+    exec(code, namespace)
+    assert len(commands) == 3  # Repeating setup does not fetch an existing checkout again.
+
+
+def test_source_fingerprint_prunes_venv_cache_and_secret_directories(notebook, tmp_path):
+    tree = ast.parse(next(source for source in _code(notebook) if "def source_files" in source))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "source_files"]
+    ignored = {".git", ".venv", ".uv-cache", ".cache", "outputs"}
+    for folder in sorted(ignored):
+        path = tmp_path / folder / "nested"
+        path.mkdir(parents=True)
+        (path / "large-or-secret.txt").write_text("must never be visited")
+    for name in ("main.py", ".env", ".env.example", "model.pt"):
+        (tmp_path / name).write_text("fixture")
+    walked = []
+
+    def walk(root):
+        for entry in os.walk(root):
+            walked.append(Path(entry[0]))
+            yield entry
+
+    namespace = {"Path": Path, "SKIP_DIRS": ignored, "os": types.SimpleNamespace(walk=walk)}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "runner-fingerprint", "exec"), namespace)
+    files = list(namespace["source_files"](tmp_path))
+    assert sorted(relative.as_posix() for _, relative in files) == [".env.example", "main.py"]
+    assert walked == [tmp_path]
 
 
 @pytest.mark.parametrize("version,accepted", [

@@ -1,0 +1,9 @@
+name: InaTRC
+root: null
+expected_images: 3250
+names:
+  - Kelas-1 (Non-truk)
+  - Kelas-2 (Truk 2 sumbu)
+  - Kelas-3 (Truk 3 sumbu)
+  - Kelas-4 (Truk 4 sumbu)
+  - Kelas-5 (Truk >=5 sumbu)

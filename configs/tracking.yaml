@@ -1,0 +1,5 @@
+mode: disabled
+entity: null
+project: skripsi-inatrc-yolo26
+group: inatrc-kd
+upload_checkpoint_each_epoch: false

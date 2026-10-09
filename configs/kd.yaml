@@ -1,0 +1,13 @@
+teacher_checkpoint: null
+dis: 6.0
+custom_status: stage_b_pilot_not_final
+crosskd:
+  branch: one2many
+  split_index: 1
+  cls_weight: 1.0
+  box_weight: 1.0
+  focal_gamma: 1.0
+csakd:
+  variant: paper
+  alpha: 1.0
+  beta: 1.0

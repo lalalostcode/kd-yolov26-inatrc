@@ -16,7 +16,7 @@ from ultralytics.utils.torch_utils import init_seeds
 from ultralytics.utils.torch_utils import unwrap_model
 
 from .config import REPO_ROOT, validate_config
-from .data import audit_dataset, create_synthetic_dataset, write_runtime_yaml
+from .data import audit_dataset, create_synthetic_dataset, write_runtime_yaml, verify_dataset_unchanged
 from .evaluate import evaluate_checkpoint
 from .io import sha256, source_provenance, write_json
 from .kd import configure_kd
@@ -66,7 +66,7 @@ def run_experiment(config: dict) -> dict:
             config["initialization"] = "pretrained"
         config["training_dataset_root"] = str(data_root)
         config["dataset_fingerprint"] = audit["fingerprint"]
-        data_yaml = write_runtime_yaml(data_root, run_dir / "data_runtime.yaml")
+        data_yaml = write_runtime_yaml(data_root, run_dir / "data_runtime.yaml", audit=audit)
         init_seeds(config["seed"], deterministic=config["training"]["deterministic"])
         # Teacher acak hanya alat diagnosis smoke, bukan teacher penelitian.
         if config["method"] != "none" and config["mode"] == "smoke" and not config["kd"]["teacher_checkpoint"]:
@@ -155,10 +155,8 @@ def run_experiment(config: dict) -> dict:
             if saved_args[key] != config["training"][key]:
                 raise RuntimeError(f"Training protocol changed: {key}")
         metrics = evaluate_checkpoint(run_dir / "weights" / "best.pt", data_yaml, run_dir, config)
-        # Audit ulang memastikan training tidak mengubah isi dataset sumber.
-        after = audit_dataset(data_root, expected_images=audit["total_images"])
-        if after["fingerprint"] != audit["fingerprint"]:
-            raise RuntimeError("Dataset bytes changed during the experiment")
+        # Hash seluruh file lagi; byte identik tidak perlu di-decode dan divalidasi ulang.
+        verify_dataset_unchanged(audit)
         summary = {"status": "completed", "run_dir": str(run_dir),
                    "best_pt": str(run_dir / "weights" / "best.pt"), "metrics": metrics,
                    "mode": config["mode"], "nonfinal": config["mode"] == "smoke",

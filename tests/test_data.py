@@ -13,6 +13,7 @@ from inatrc_kd.data import (
     audit_dataset,
     create_synthetic_dataset,
     write_runtime_yaml,
+    verify_dataset_unchanged,
 )
 
 
@@ -228,6 +229,7 @@ def test_safe_loader_rejects_silent_image_exclusion(dataset, tmp_path, monkeypat
     probe.im_files = [str(path) for path in sorted((dataset / "train" / "images").iterdir())]
     probe.label_files = [str(dataset / "train" / "labels" / f"{Path(name).stem}.txt") for name in probe.im_files]
     probe.audit_cache_dir = tmp_path / "cache"
+    probe.audited_files = None
     with pytest.raises(DatasetAuditError, match="scan changed audited images/boxes"):
         probe._load_or_scan_cache(dataset / "train" / "labels.cache", "hash")
 
@@ -237,3 +239,82 @@ def test_safe_loader_rejects_disk_cache(dataset, tmp_path):
 
     with pytest.raises(DatasetAuditError, match="Disk image caching"):
         SafeYOLODataset(data={"path": str(dataset)}, audit_cache_dir=tmp_path / "cache", cache="disk")
+
+
+def test_end_verification_reads_bytes_without_repeating_decode(dataset, monkeypatch):
+    import inatrc_kd.data as module
+    report = audit_dataset(dataset, expected_images=20)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Identical bytes do not need repeated decode/annotation parsing")
+    monkeypatch.setattr(module, "_verify_image", forbidden)
+    monkeypatch.setattr(module, "_label_rows", forbidden)
+    verify_dataset_unchanged(report)
+
+
+@pytest.mark.parametrize("kind", ["image", "label", "pair-name", "missing", "added"])
+def test_end_verification_rejects_changed_bytes_and_inventory(dataset, kind):
+    import os
+    report = audit_dataset(dataset, expected_images=20)
+    image = sorted((dataset / "train" / "images").iterdir())[0]
+    label = dataset / "train" / "labels" / f"{image.stem}.txt"
+    if kind in ("image", "label"):
+        path = image if kind == "image" else label
+        previous = path.stat()
+        content = bytearray(path.read_bytes())
+        content[-2] ^= 1
+        path.write_bytes(content)
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    elif kind == "pair-name":
+        image.rename(image.with_name("renamed.png"))
+        label.rename(label.with_name("renamed.txt"))
+    elif kind == "missing":
+        image.unlink()
+    else:
+        shutil.copyfile(image, image.with_name("added.png"))
+        shutil.copyfile(label, label.with_name("added.txt"))
+    with pytest.raises(DatasetAuditError, match="changed"):
+        verify_dataset_unchanged(report)
+
+
+def test_loader_skips_decode_only_for_matching_fresh_audit(dataset, tmp_path, monkeypatch):
+    import inatrc_kd.data as module
+    from ultralytics.cfg import get_cfg
+    report = audit_dataset(dataset, expected_images=20)
+    monkeypatch.setattr(module, "_verify_image", lambda path: pytest.fail("Repeated decode"))
+    from inatrc_kd.data import SafeYOLODataset
+    arguments = dict(img_path=str(dataset / "train" / "images"), imgsz=64, batch_size=2,
+                     data={"path": str(dataset), "nc": 5, "names": dict(enumerate(CLASS_NAMES)),
+                           "audit_file_sha256": report["file_sha256"]},
+                     hyp=get_cfg(), augment=False, cache=False, audit_cache_dir=tmp_path / "cache")
+    assert len(SafeYOLODataset(**arguments)) == 10
+    assert len(SafeYOLODataset(**arguments)) == 10
+    _first_label(dataset).write_text("0 0.5 0.5 0.4 0.4\n", encoding="utf-8")
+    with pytest.raises(DatasetAuditError, match="bytes changed since audit"):
+        SafeYOLODataset(**arguments)
+    assert not list(dataset.rglob("*.cache"))
+
+
+def test_stale_manifest_cannot_trigger_source_image_repair(dataset, tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from ultralytics.cfg import get_cfg
+    from ultralytics.data.dataset import YOLODataset
+    from inatrc_kd.data import SafeYOLODataset
+    report = audit_dataset(dataset, expected_images=20)
+    image = sorted((dataset / "train" / "images").iterdir())[0]
+    image.write_bytes(b"corrupt bytes")
+    upstream = Mock(side_effect=AssertionError("Do not scan/repair altered source"))
+    monkeypatch.setattr(YOLODataset, "_load_or_scan_cache", upstream)
+    with pytest.raises(DatasetAuditError, match="bytes changed since audit"):
+        SafeYOLODataset(img_path=str(dataset / "train" / "images"), imgsz=64, batch_size=2,
+                        data={"path": str(dataset), "nc": 5, "names": dict(enumerate(CLASS_NAMES)),
+                              "audit_file_sha256": report["file_sha256"]},
+                        hyp=get_cfg(), augment=False, cache=False, audit_cache_dir=tmp_path / "cache")
+    upstream.assert_not_called()
+    assert image.read_bytes() == b"corrupt bytes"
+
+
+def test_runtime_manifest_requires_correct_dataset_root(dataset, tmp_path):
+    report = audit_dataset(dataset, expected_images=20)
+    report["source_path"] = str(tmp_path / "different-source")
+    with pytest.raises(DatasetAuditError, match="different dataset root"):
+        write_runtime_yaml(dataset, tmp_path / "outputs" / "data.yaml", audit=report)

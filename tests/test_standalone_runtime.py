@@ -93,7 +93,32 @@ def test_existing_dependencies_skip_application_install(pip_fixture, tmp_path):
     pip_fixture.plan.clear()
     pip_fixture.versions["ultralytics"] = "8.4.155"
     runtime.setup_dependencies(["ultralytics==8.4.155"], tmp_path)
-    assert len(pip_fixture.calls) == 1
+    assert pip_fixture.calls == []
+    assert json.loads((tmp_path / "setup_logs" / "pip_plan.json").read_text())["resolution_skipped"]
+
+
+def test_matching_pins_with_dependency_conflict_still_resolve(pip_fixture, monkeypatch, tmp_path):
+    pip_fixture.versions["ultralytics"] = "8.4.155"
+    checks = []
+    def check(packages):
+        checks.append(packages)
+        if len(checks) == 1:
+            raise RuntimeError("transitive conflict")
+        return [{"package": "ultralytics", "active_version": "8.4.155"}]
+    monkeypatch.setattr(runtime, "_setup_validate_requirements", check)
+    report = runtime.setup_dependencies(["ultralytics==8.4.155"], tmp_path)
+    assert len(pip_fixture.calls) == 2 and len(checks) == 2
+    assert report["dependency_checks"]
+
+
+def test_matching_pins_validate_graph_once_without_pip(pip_fixture, monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    pip_fixture.versions["ultralytics"] = "8.4.155"
+    check = Mock(return_value=[])
+    monkeypatch.setattr(runtime, "_setup_validate_requirements", check)
+    runtime.setup_dependencies(["ultralytics==8.4.155"], tmp_path)
+    check.assert_called_once()
+    assert not pip_fixture.calls
 
 
 def test_torch_snapshot_change_stops_setup(pip_fixture, monkeypatch, tmp_path):
@@ -124,6 +149,7 @@ def test_duplicate_requirements_must_agree():
 
 def test_setup_failure_secret_is_redacted(pip_fixture, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("WANDB_API_KEY", "wandb-private-test-key")
+    pip_fixture.versions["wandb"] = "0.28.0"  # Resolver diperlukan, sehingga failure path diuji.
 
     def failing_command(*args):
         raise RuntimeError("Network failed for wandb-private-test-key")
@@ -234,7 +260,7 @@ def test_numpy_replaced_by_pip_requires_restart_after_successful_install(pip_fix
 def test_application_requirements_check_active_markers_and_versions(monkeypatch):
     monkeypatch.setattr(runtime.importlib.metadata, "requires", lambda name: [
         "numpy>=2,<3", "optional-tool; extra == 'dev'", "windows-only; sys_platform == 'never'",
-    ])
+    ] if name == "ultralytics" else [])
     monkeypatch.setattr(runtime.importlib.metadata, "version", lambda name: "2.5.3")
     checked = runtime._setup_validate_requirements(["ultralytics"])
     assert len(checked) == 1
@@ -245,6 +271,15 @@ def test_application_requirements_reject_conflicts(monkeypatch):
     monkeypatch.setattr(runtime.importlib.metadata, "requires", lambda name: ["numpy<2"])
     monkeypatch.setattr(runtime.importlib.metadata, "version", lambda name: "2.5.3")
     with pytest.raises(RuntimeError, match="tidak sesuai"):
+        runtime._setup_validate_requirements(["ultralytics"])
+
+
+def test_application_requirements_reject_transitive_conflict(monkeypatch):
+    requirements = {"ultralytics": ["requests>=2"], "requests": ["urllib3<2"]}
+    versions = {"requests": "2.32.0", "urllib3": "3.0.0"}
+    monkeypatch.setattr(runtime.importlib.metadata, "requires", lambda name: requirements.get(name, []))
+    monkeypatch.setattr(runtime.importlib.metadata, "version", lambda name: versions[name])
+    with pytest.raises(RuntimeError, match="requests.*urllib3<2"):
         runtime._setup_validate_requirements(["ultralytics"])
 
 

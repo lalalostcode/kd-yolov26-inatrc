@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -114,6 +115,7 @@ def test_standalone_notebook_schema_syntax_defaults_and_bahasa(standalone_notebo
     config = _literal_config(notebook)
     assert (config["STAGE"], config["STUDENT"], config["METHOD"], config["MODE"]) == expected[1:]
     assert (config["SEED"], config["WANDB_MODE"]) == (42, "disabled")
+    assert config["EVALUATE_COCO_AREA"] is False and config["CREATE_RESULTS_ZIP"] is False
     assert config.get("TEACHER_CKPT") in (None, "")
     markdown = "\n".join(_source(cell) for cell in notebook["cells"] if cell["cell_type"] == "markdown")
     for heading in HEADINGS:
@@ -303,17 +305,68 @@ def test_standalone_epoch_logger_tracks_tied_best_and_final_validation_once(tmp_
     tracker.epoch_artifact.assert_not_called()
 
 
+def test_optional_exports_keep_primary_evaluator_and_metric_definition(tmp_path, monkeypatch):
+    import numpy as np
+    import torch
+    notebook = nbformat.read(NOTEBOOK_DIR / "03_baseline_yolo26n.ipynb", as_version=4)
+    namespace = _definition_namespace(notebook)
+    native = torch.nn.Linear(2, 2)
+    native.model = [SimpleNamespace(nc=5)]
+    native.names = dict(enumerate(namespace["CLASS_NAMES"]))
+    box = SimpleNamespace(mp=0.6, mr=0.7, map50=0.8, map=0.51,
+                          ap_class_index=np.arange(5), all_ap=np.full((5, 10), 0.51),
+                          p=np.full(5, 0.6), r=np.full(5, 0.7), ap50=np.full(5, 0.8))
+    result = SimpleNamespace(box=box, save_dir=tmp_path / "val", speed={"inference": 1.0},
+                             coco_area={key: 0.51 for key in namespace["COCO_METRIC_KEYS"]})
+    val = Mock(return_value=result)
+    monkeypatch.setitem(namespace, "YOLO", lambda path: SimpleNamespace(model=native, val=val))
+    monkeypatch.setitem(namespace, "get_flops", lambda model, imgsz: 1.0)
+    namespace.update(MODE="smoke", DEVICE="cpu", INPUT_ROOT=str(tmp_path / "inputs"),
+                     OUTPUT_ROOT=str(tmp_path / "outputs"), DATASET_ROOT="")
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"test fixture; YOLO loading mocked")
+    metrics, options = [], []
+    for enabled in (False, True):
+        namespace["EVALUATE_COCO_AREA"] = enabled
+        config = namespace["make_config"]()
+        run = tmp_path / str(enabled)
+        run.mkdir()
+        metrics.append(namespace["evaluate_checkpoint"](checkpoint, "unused.yaml", run, config))
+        options.append(val.call_args.kwargs)
+        assert (run / "coco_area.json").exists() == enabled
+        assert ("coco_area" in metrics[-1]) == enabled
+    assert options[0]["validator"] is namespace["SafeDetectionValidator"]
+    assert options[1]["validator"] is namespace["AreaAuditValidator"]
+    for key in ("nms", "conf", "iou", "max_det", "augment", "quantize", "split"):
+        assert options[0][key] == options[1][key]
+    for key in ("precision", "recall", "mAP50", "mAP50_95", "per_class", "complexity"):
+        assert metrics[0][key] == metrics[1][key]
+
+
+def test_teacher_seed_is_fixed_but_student_seed_can_change(tmp_path):
+    for filename, stage in (("01_teacher_yolo26m", "teacher"), ("03_baseline_yolo26n", "student")):
+        namespace = _definition_namespace(nbformat.read(NOTEBOOK_DIR / f"{filename}.ipynb", as_version=4))
+        namespace.update(MODE="smoke", SEED=43, DEVICE="cpu", INPUT_ROOT=str(tmp_path / "inputs"),
+                         OUTPUT_ROOT=str(tmp_path / "outputs"), DATASET_ROOT="")
+        if stage == "teacher":
+            with pytest.raises(ValueError, match="Teacher.*42"):
+                namespace["make_config"]()
+        else:
+            assert namespace["make_config"]()["training"]["seed"] == 43
+
+
 @pytest.mark.parametrize("expected", EXPECTED[3:], ids=[row[0] for row in EXPECTED[3:]])
 def test_inline_kd_only_gradient_teacher_and_optimizer(expected):
     import torch
     from ultralytics.nn.distill_model import DistillationModel
+    from inatrc_kd.preflight import _model, _batch, _gradient_summary
 
     notebook = nbformat.read(NOTEBOOK_DIR / f"{expected[0]}.ipynb", as_version=4)
     namespace = _definition_namespace(notebook)
     selected = torch.device("cpu")
     torch.manual_seed(42)
-    student = namespace["_model"](expected[2], 160, selected)
-    teacher = namespace["calibrate_diagnostic_bn"](namespace["_model"]("m", 160, selected), 160)
+    student = _model(expected[2], 160, selected)
+    teacher = namespace["calibrate_diagnostic_bn"](_model("m", 160, selected), 160)
     if expected[3] == "native":
         wrapper = DistillationModel(teacher_model=teacher, student_model=student).train()
     else:
@@ -328,11 +381,11 @@ def test_inline_kd_only_gradient_teacher_and_optimizer(expected):
         initial_hooks = hooks()
         for _ in range(2):
             wrapper.zero_grad(set_to_none=True)
-            loss, items = wrapper(namespace["_batch"](160, selected))
+            loss, items = wrapper(_batch(160, selected))
             assert bool(loss.isfinite().all()) and float(items["dis_loss"]) > 0
             loss[-1].backward()  # Loss KD saja; loss deteksi tidak menutupi gradient yang putus.
             for parameters in (wrapper.student_model.parameters(), wrapper.projector.parameters()):
-                gradient = namespace["_gradient_summary"](parameters)
+                gradient = _gradient_summary(parameters)
                 assert gradient["finite"] and gradient["nonzero"]
             assert all(not parameter.requires_grad and parameter.grad is None for parameter in wrapper.teacher_model.parameters())
             assert not wrapper.teacher_model.training
@@ -357,6 +410,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 root = Path.cwd()
 os.environ["YOLO_CONFIG_DIR"] = str(root / "yolo-settings")
@@ -367,10 +421,14 @@ original_import = builtins.__import__
 def independent_import(name, *args, **kwargs):
     if name == "inatrc_kd" or name.startswith("inatrc_kd."):
         raise AssertionError("A standalone notebook imported repository code: " + name)
+    if name.startswith("faster_coco_eval") and os.environ.get("TEST_OPTIONAL_COCO", "0") != "1":
+        raise AssertionError("COCO disabled must work without faster_coco_eval.")
     return original_import(name, *args, **kwargs)
 builtins.__import__ = independent_import
 # IPython menaruh kelas cell pada modul __main__; samakan agar torch.save dapat pickle.
 namespace = globals()
+stage_profile = {}
+process_started = time.perf_counter()
 notebook = json.loads((root / "experiment.ipynb").read_text(encoding="utf-8"))
 for cell in notebook["cells"]:
     if cell["cell_type"] != "code":
@@ -379,21 +437,46 @@ for cell in notebook["cells"]:
     source = source if isinstance(source, str) else "".join(source)
     if cell["id"] == "setup":
         def setup_dependencies(*args, **kwargs):
-            expected = {"ultralytics": "8.4.155", "wandb": "0.28.1", "faster-coco-eval": "1.6.7"}
+            expected = {"ultralytics": "8.4.155", "wandb": "0.28.1"}
+            if os.environ.get("TEST_OPTIONAL_COCO", "0") == "1":
+                expected["faster-coco-eval"] = "1.6.7"
             for name, version in expected.items():
                 assert importlib.metadata.version(name) == version
             print("TEST: pip installation skipped; existing pinned dependencies checked.", flush=True)
         namespace["setup_dependencies"] = setup_dependencies
     print("TEST CELL " + cell["id"], flush=True)
     exec(compile(source, "experiment.ipynb:" + cell["id"], "exec"), namespace)
+    if cell["id"] == "training-definitions":
+        def measured(function, name):
+            def call(*args, **kwargs):
+                started = time.perf_counter()
+                try:
+                    return function(*args, **kwargs)
+                finally:
+                    row = stage_profile.setdefault(name, {"calls": 0, "seconds": 0.0})
+                    row["calls"] += 1
+                    row["seconds"] += time.perf_counter() - started
+            return call
+        for name in ("environment_report", "audit_dataset", "verify_dataset_unchanged", "inspect_model", "evaluate_checkpoint", "_verify_image", "_sha256_file", "make_synthetic_teacher", "create_results_zip"):
+            if name in namespace:
+                namespace[name] = measured(namespace[name], name)
     if cell["id"] == "config":
         namespace.update(MODE="smoke", DEVICE="cpu", WANDB_MODE="disabled", SEED=42,
                          DATASET_ROOT="", TEACHER_CKPT="", MODEL_WEIGHTS=None,
                          INPUT_ROOT=str(root / "inputs"), OUTPUT_ROOT=str(root / "outputs"))
+        namespace["EVALUATE_COCO_AREA"] = os.environ.get("TEST_OPTIONAL_COCO", "0") == "1"
+        namespace["CREATE_RESULTS_ZIP"] = os.environ.get("TEST_OPTIONAL_ZIP", "0") == "1"
         (root / "inputs").mkdir(exist_ok=True)
 summary_path = root / "outputs" / "latest_run.json"
 assert summary_path.is_file(), "Notebook did not complete one experiment."
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
+run = Path(summary["run_dir"])
+metadata = json.loads((run / "metadata.json").read_text(encoding="utf-8"))
+profile = {"stages": stage_profile, "process_seconds": time.perf_counter() - process_started,
+           "training_seconds": metadata["training_seconds"], "metrics": summary["metrics"],
+           "initial_student_state_sha256": metadata["initial_student_state_sha256"],
+           "files": sorted(str(path.relative_to(run)) for path in run.rglob("*") if path.is_file())}
+(root / "outputs" / "test_profile.json").write_text(json.dumps(profile, indent=2), encoding="utf-8")
 print("ISOLATED_SUMMARY=" + json.dumps(summary), flush=True)
 '''
 
@@ -425,6 +508,7 @@ def test_standalone_smoke_runs_outside_checkout_without_repo_import(expected, tm
         log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
         assert completed.returncode == 0, f"Standalone smoke failed; log: {log}\n{log.read_text(encoding='utf-8')[-10000:]}"
         summary = json.loads((root / "outputs" / "latest_run.json").read_text(encoding="utf-8"))
+        (tmp_path / f"{expected[0]}-profile.json").write_bytes((root / "outputs" / "test_profile.json").read_bytes())
         assert summary["status"] == "completed" and summary["nonfinal"] is True
         assert summary["mode"] == "smoke" and summary["test_evaluated"] is False
         assert summary["best_epoch"] == 1
@@ -482,10 +566,16 @@ def test_standalone_smoke_runs_outside_checkout_without_repo_import(expected, tm
         assert audit["total_images"] == 20
         assert not list((run_dir / "weights").glob("epoch*.pt"))
         coco_paths = sorted(run_dir.glob("*coco*.json"))
-        assert coco_paths, "Final COCO metrics should be available separately."
+        assert bool(coco_paths) == config["evaluation"]["coco_area"]
         bundles = list((root / "outputs").glob("*.zip"))
-        assert len(bundles) == 1, "Notebook must provide one downloadable result bundle."
-        with zipfile.ZipFile(bundles[0]) as bundle:
-            assert any(name.endswith("weights/best.pt") for name in bundle.namelist())
-            assert any(name.endswith("epoch_history.csv") for name in bundle.namelist())
-            assert not any(".env" in name or name.endswith("settings.json") for name in bundle.namelist())
+        assert len(bundles) == int(config["create_results_zip"])
+        if bundles:
+            with zipfile.ZipFile(bundles[0]) as bundle:
+                assert any(name.endswith("weights/best.pt") for name in bundle.namelist())
+                assert any(name.endswith("epoch_history.csv") for name in bundle.namelist())
+                assert not any(".env" in name or name.endswith("settings.json") for name in bundle.namelist())
+        profile = json.loads((tmp_path / f"{expected[0]}-profile.json").read_text(encoding="utf-8"))
+        assert "inspect_model" not in profile["stages"] and "environment_report" not in profile["stages"]
+        assert profile["stages"]["audit_dataset"]["calls"] == 1
+        assert profile["stages"]["verify_dataset_unchanged"]["calls"] == 1
+        assert profile["stages"]["_verify_image"]["calls"] == 20

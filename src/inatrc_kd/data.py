@@ -171,6 +171,7 @@ def audit_dataset(
         raise DatasetAuditError("expected_images must be a positive integer or None")
     destination = _outside_source(Path(output_dir), root) if output_dir is not None else None
     split_rows, class_rows, box_rows = [], [], []
+    file_sha256 = {}
     occurrences: dict[str, list[dict[str, str]]] = defaultdict(list)
     fingerprint = hashlib.sha256()
 
@@ -192,6 +193,8 @@ def audit_dataset(
             _verify_image(image)
             image_hash = _sha256_file(image)
             label_bytes, rows = _label_rows(label)
+            file_sha256[image.relative_to(root).as_posix()] = image_hash
+            file_sha256[label.relative_to(root).as_posix()] = hashlib.sha256(label_bytes).hexdigest()
             # Fingerprint berubah jika nama, isi gambar, atau anotasi berubah.
             fingerprint.update(f"{split}/{image.name}\n{image_hash}\n{label.name}\n".encode())
             fingerprint.update(label_bytes)
@@ -226,6 +229,7 @@ def audit_dataset(
         "source_path": str(root), "class_names": list(class_names), "expected_images": expected_images,
         "total_images": total_images, "total_boxes": len(box_rows),
         "sha256": fingerprint.hexdigest(), "fingerprint": fingerprint.hexdigest(),
+        "file_sha256": file_sha256,
         "splits": split_rows, "class_distribution": class_rows, "bbox_distribution": box_rows,
         "cross_split_exact_duplicates": duplicates, "exact_cross_split_duplicate_groups": len(duplicates),
         "near_duplicate_or_sequence_leakage_checked": False,
@@ -255,7 +259,28 @@ def audit_dataset(
     return report
 
 
-def write_runtime_yaml(root: str | Path, out_path: str | Path) -> Path:
+def verify_dataset_unchanged(report: dict[str, Any]) -> None:
+    """Periksa nama dan seluruh byte lagi, tanpa mengulang decode/validasi isi yang identik."""
+    root = Path(report["source_path"]).resolve()
+    actual_files = {}
+    fingerprint = hashlib.sha256()
+    for split in SPLITS:
+        images = _by_stem(_files(root / split / "images", labels=False), "image")
+        labels = _by_stem(_files(root / split / "labels", labels=True), "label")
+        if images.keys() != labels.keys() or not images:
+            raise DatasetAuditError(f"Dataset pairs changed after audit: {root / split}")
+        for stem, image in sorted(images.items()):
+            label = labels[stem]
+            image_hash, raw = _sha256_file(image), label.read_bytes()
+            actual_files[image.relative_to(root).as_posix()] = image_hash
+            actual_files[label.relative_to(root).as_posix()] = hashlib.sha256(raw).hexdigest()
+            fingerprint.update(f"{split}/{image.name}\n{image_hash}\n{label.name}\n".encode())
+            fingerprint.update(raw)
+    if actual_files != report["file_sha256"] or fingerprint.hexdigest() != report["fingerprint"]:
+        raise DatasetAuditError("Dataset file names/bytes changed after audit; start a new audited run")
+
+
+def write_runtime_yaml(root: str | Path, out_path: str | Path, *, audit: dict | None = None) -> Path:
     """Write a five-class data YAML outside the original dataset."""
     import yaml
 
@@ -267,6 +292,10 @@ def write_runtime_yaml(root: str | Path, out_path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = {"path": str(root), **{split: str(root / split / "images") for split in SPLITS},
             "nc": 5, "names": list(CLASS_NAMES)}
+    if audit is not None:
+        if Path(audit["source_path"]).resolve() != root:
+            raise DatasetAuditError("Audit manifest belongs to a different dataset root")
+        data["audit_file_sha256"] = audit["file_sha256"]
     destination.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return destination
 
@@ -319,6 +348,8 @@ def __getattr__(name: str) -> Any:
             if not data.get("path"):
                 raise DatasetAuditError("SafeYOLODataset requires an explicit data['path']")
             self.audit_cache_dir = _outside_source(Path(audit_cache_dir), Path(data["path"]).resolve())
+            self.source_root = Path(data["path"]).resolve()
+            self.audited_files = data.get("audit_file_sha256")
             if kwargs.get("cache") == "disk":
                 raise DatasetAuditError("Disk image caching would write into the source dataset; use cache=False")
             if kwargs.get("task", "detect") != "detect":
@@ -331,11 +362,19 @@ def __getattr__(name: str) -> Any:
             content_digest = hashlib.sha256(str(Path(cache_path).resolve()).encode())
             for image_name, label_name in zip(self.im_files, self.label_files, strict=True):
                 image_path, label_path = Path(image_name), Path(label_name)
-                _verify_image(image_path)
+                image_hash = _sha256_file(image_path)
+                if self.audited_files is None:
+                    _verify_image(image_path)
                 raw, rows = _label_rows(label_path)
+                if self.audited_files is not None:
+                    # Lewati decode berulang hanya setelah byte cocok dengan audit run ini.
+                    for path, digest in ((image_path, image_hash), (label_path, hashlib.sha256(raw).hexdigest())):
+                        relative = path.resolve().relative_to(self.source_root).as_posix()
+                        if self.audited_files.get(relative) != digest:
+                            raise DatasetAuditError(f"Dataset bytes changed since audit: {path}")
                 expected[image_name] = rows
                 content_digest.update(image_name.encode())
-                content_digest.update(_sha256_file(image_path).encode())
+                content_digest.update(image_hash.encode())
                 content_digest.update(raw)
             # Nama cache berdasarkan isi file; cache lama tidak lolos saat isi berubah.
             redirected = self.audit_cache_dir / f"{content_digest.hexdigest()}.cache"

@@ -89,7 +89,7 @@ def _configuration(preset):
                 for name in ("training", "dataset", "kd", "tracking")}
     training = sections.pop("training")
     evaluation = training["evaluation"]
-    evaluation.update(conf=0.001, save_json=True)
+    evaluation.update(conf=0.001, save_json=False)
     kd = sections["kd"]
     kd = {key: value for key, value in kd.items() if key not in {"crosskd", "csakd"} or key == preset["method"]}
     code = "from copy import deepcopy\n\n"
@@ -104,6 +104,7 @@ def _configuration(preset):
         """Bangun parameter efektif dari pilihan di cell pertama."""
         training = deepcopy(FULL_PROTOCOL)
         evaluation = deepcopy(EVALUATION_PROTOCOL)
+        evaluation.update(coco_area=bool(EVALUATE_COCO_AREA), save_json=bool(EVALUATE_COCO_AREA))
         if MODE == "smoke":
             training.update(SMOKE_PROTOCOL)
             evaluation["pilot_latency"] = False
@@ -125,8 +126,10 @@ def _configuration(preset):
         config = {"stage": STAGE, "student": STUDENT, "method": METHOD, "mode": MODE,
                   "seed": SEED, "device": str(DEVICE), "model": model, "output_root": str(OUTPUT_ROOT),
                   "training": training, "evaluation": evaluation, "dataset": dataset, "kd": kd,
-                  "tracking": tracking}
+                  "tracking": tracking, "create_results_zip": bool(CREATE_RESULTS_ZIP)}
         validate_config(config)
+        if STAGE == "teacher" and SEED != 42:
+            raise ValueError("Teacher penelitian tetap seed 42; seed student boleh diubah.")
         if METHOD != "none" and MODE == "full" and not TEACHER_CKPT:
             raise ValueError("KD full memerlukan TEACHER_CKPT: best.pt teacher YOLO26m InaTRC lima kelas.")
         return config
@@ -177,9 +180,12 @@ def _training(preset):
     start = code.index('    provenance_file = os.getenv("INATRC_SOURCE_PROVENANCE")')
     end = code.index("    try:\n", start)
     code = code[:start] + code[end:]
-    # Pemeriksaan graph cukup memakai batch kecil; training tetap memakai protokol penuh.
-    code = code.replace('imgsz=config["training"]["imgsz"], device=config["device"],\n            batch_size=config["training"]["batch"]',
-                        'imgsz=160, device=config["device"],\n            batch_size=2')
+    # Environment sudah dicek oleh cell GPU; probe acak tetap tersedia di CLI lokal.
+    code = code.replace('environment = environment_report(config["device"], require_gpu=config["device"] != "cpu")',
+                        'environment = ENVIRONMENT\n        if environment["requested_device"] != config["device"]:\n            raise ValueError("Device berubah setelah preflight; jalankan ulang cell Pemeriksaan GPU.")')
+    start = code.index('        metadata["architecture_probe"] = inspect_model(')
+    end = code.index('        model = YOLO(config["model"])', start)
+    code = code[:start] + code[end:]
     if preset["method"] == "none":
         start = code.index('        # Teacher acak hanya alat diagnosis smoke')
         end = code.index("        kd_args = configure_kd(config)", start)
@@ -200,14 +206,15 @@ def _training(preset):
 def _evaluation():
     code = _module("src/inatrc_kd/coco.py")
     evaluation = _module("src/inatrc_kd/evaluate.py")
-    evaluation = evaluation.replace("validator=SafeDetectionValidator", "validator=AreaAuditValidator").replace("save_json=False", "save_json=True")
+    evaluation = evaluation.replace("validator=SafeDetectionValidator", 'validator=AreaAuditValidator if evaluation["coco_area"] else SafeDetectionValidator').replace("save_json=False", 'save_json=evaluation["coco_area"]')
     evaluation = evaluation.replace('    metrics["per_class"] = per_class',
         '    metrics["per_class"] = per_class\n'
-        '    if getattr(result, "coco_area", None) is None:\n'
-        '        raise RuntimeError("COCO area evaluator did not return final metrics")\n'
-        '    metrics["coco_area"] = result.coco_area\n'
-        '    write_json(run_dir / "coco_area.json", result.coco_area)\n'
-        '    pd.DataFrame([{key: result.coco_area[key] for key in COCO_METRIC_KEYS}]).to_csv(run_dir / "coco_metrics.csv", index=False)')
+        '    if evaluation["coco_area"]:\n'
+        '        if getattr(result, "coco_area", None) is None:\n'
+        '            raise RuntimeError("COCO area evaluator did not return final metrics")\n'
+        '        metrics["coco_area"] = result.coco_area\n'
+        '        write_json(run_dir / "coco_area.json", result.coco_area)\n'
+        '        pd.DataFrame([{key: result.coco_area[key] for key in COCO_METRIC_KEYS}]).to_csv(run_dir / "coco_metrics.csv", index=False)')
     evaluation = evaluation.replace('    write_json(run_dir / "metrics.json", metrics)',
         '    pd.DataFrame([{key: metrics[key] for key in ("precision", "recall", "mAP50", "mAP50_95")}]).to_csv(run_dir / "metrics.csv", index=False)\n'
         '    write_json(run_dir / "metrics.json", metrics)')
@@ -262,6 +269,10 @@ WANDB_MODE = "disabled"  # "disabled", "offline", atau "online"
 WANDB_PROJECT = "skripsi-inatrc-yolo26"
 WANDB_ENTITY = None  # username/team; WANDB_API_KEY di Secrets, jangan ditulis di sini
 
+# Fitur tambahan: samakan pilihan COCO di semua eksperimen yang dibandingkan.
+EVALUATE_COCO_AREA = False  # True: AP-S/AP-M/AP-L tambahan, lebih banyak ekspor/evaluasi
+CREATE_RESULTS_ZIP = False  # True: bundel unduhan; Kaggle Save Version sudah menyimpan folder
+
 # Opsional Colab Drive: uncomment, lalu isi DATASET_ROOT / TEACHER_CKPT di atas.
 # from google.colab import drive
 # drive.mount("/content/drive")
@@ -271,6 +282,8 @@ WANDB_ENTITY = None  # username/team; WANDB_API_KEY di Secrets, jangan ditulis d
     pins, numpy = _requirements()
     code("setup", _literal("APP_REQUIREMENTS", pins) + f'''
 APP_REQUIREMENTS.append("numpy==" + ({numpy[0]!r} if sys.version_info[:2] < (3, 12) else {numpy[1]!r}))
+if not EVALUATE_COCO_AREA:
+    APP_REQUIREMENTS = [pin for pin in APP_REQUIREMENTS if not pin.startswith("faster-coco-eval==")]
 PLATFORM_INFO = detect_platform()
 INPUT_ROOT = str(Path(INPUT_ROOT or PLATFORM_INFO["input_root"] or Path.cwd() / "inputs").expanduser().resolve())
 OUTPUT_ROOT = str(Path(OUTPUT_ROOT or PLATFORM_INFO["output_root"]).expanduser().resolve())
@@ -294,7 +307,8 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(OUTPUT_ROOT) / "matplotlib-cache"
     code("environment-definitions", _module("src/inatrc_kd/preflight.py", names={"INATRC_NAMES", "_device", "_validate_runtime_requirements", "_validate_python_torch_pair", "environment_report"}).replace("uv environment", "pip/kernel environment")
          + "\n" + _module("src/inatrc_kd/io.py", names={"sha256", "write_json"}))
     code("environment", '''validate_loaded_packages([requirement.split("==", 1)[0] for requirement in APP_REQUIREMENTS])
-ENVIRONMENT = environment_report(str(DEVICE), require_gpu=str(DEVICE) != "cpu")
+checked = None if SETUP_REPORT is None else [row for row in SETUP_REPORT["dependency_checks"] if row["package"] in ("torch", "torchvision")]
+ENVIRONMENT = environment_report(str(DEVICE), require_gpu=str(DEVICE) != "cpu", dependency_checks=checked)
 write_json(Path(OUTPUT_ROOT) / "setup_logs" / "environment.json", ENVIRONMENT)
 print("Pemeriksaan GPU/ABI lolos:", ENVIRONMENT["resolved_device"], ENVIRONMENT["torch_version"], flush=True)
 ''')
@@ -304,20 +318,18 @@ print("Pemeriksaan GPU/ABI lolos:", ENVIRONMENT["resolved_device"], ENVIRONMENT[
     code("configuration", '''CONFIG = make_config()
 print("Dataset:", CONFIG["dataset"]["root"] or "sintetis (smoke)", flush=True)
 print("Protokol:", CONFIG["model"], MODE, "seed", SEED, "batch", CONFIG["training"]["batch"], flush=True)
-# Audit ketat dijalankan sebelum training dan diulang setelahnya dalam run_experiment.
+# Audit lengkap sekali; loader dan pemeriksaan akhir mencocokkan seluruh byte dengan audit itu.
 ''')
     md("model-heading", "## Model dan Teacher\nFull dimulai dari pretrained COCO sesuai ukuran. Hash checkpoint dan state student awal dicatat. Teacher KD harus YOLO26m lima kelas dengan urutan kelas yang sama; teacher sintetis hanya diperbolehkan pada smoke.")
-    names = {"_model", "_batch", "_tensor_shapes", "_gradient_summary", "inspect_model", "_state_hash"}
+    names = {"_state_hash"}
     if preset["method"] != "none":
         names.update({"ordered_names", "check_teacher", "calibrate_diagnostic_bn", "make_synthetic_teacher"})
-    if preset["method"] == "native":
-        names.add("native_gradient_probe")
     code("model-definitions", _module("src/inatrc_kd/preflight.py", names=names))
     md("kd-heading", "## Algoritme KD\n" + {"none": "Loss deteksi Ultralytics untuk teacher/baseline.", "native": "API resmi Ultralytics: distill_model dan dis=6.0. Mekanisme KD tetap milik Ultralytics.", "crosskd": "Adaptasi pilot CrossKD: suffix head teacher one-to-many, adapter sebelum optimizer, teacher frozen. Sumber: [CrossKD penulis](https://github.com/jbwang1997/CrossKD).", "csakd": "Adaptasi pilot CSAKD: varian paper, pasangan backbone/neck dari graph. Sumber: [repository penulis](https://github.com/KefanZhan/YOLOv8-KD)."}[preset["method"]])
     code("kd-definitions", _kd(preset))
     md("logging-heading", "## Logging per Epoch\nSelalu tampil dan tersimpan lokal: loss, KD, metrik val, LR, fitness, durasi, is_best, dan best_epoch. Kejadian penyimpanan best.pt menjadi acuan; fitness seri mengikuti checkpoint terbaru. Final validation tidak menambah epoch.")
     code("tracking-definitions", _module("src/inatrc_kd/tracking.py"))
-    md("evaluation-heading", "## Evaluasi best.pt\nDefinisi evaluator berikut dipakai sesudah training. Muat ulang YOLO(best.pt), val pada FP32: nms=None, conf=0.001, IoU=0.7, max_det=300, augmentasi off. Parameter/FLOPs dihitung dari checkpoint lima kelas sebelum fusion. COCO area terpisah memakai bbox pixel asli dan maxDets=[1,10,100]; kelas/ukuran tanpa GT bernilai null.")
+    md("evaluation-heading", "## Evaluasi best.pt\nMuat ulang YOLO(best.pt), val FP32: nms=None, conf=0.001, IoU=0.7, max_det=300, augmentasi off. Parameter/FLOPs dari checkpoint lima kelas sebelum fusion; latency, VRAM, dan durasi tetap dicatat. COCO area opsional (EVALUATE_COCO_AREA=True) memakai bbox pixel asli/maxDets=[1,10,100]; definisi metrik utama tetap sama.")
     code("evaluation-definitions", _evaluation())
     md("training-heading", "## Training\nSatu run memakai folder unik. OOM/nonfinite menghentikan run. best.pt dan last.pt disimpan bila tersedia; finalisasi Ultralytics dapat menghapus optimizer dari checkpoint.")
     provenance = {"format": "inline-notebook", "preset": preset["name"], "code_sha256": "CODE_SHA256_PLACEHOLDER",
@@ -326,23 +338,25 @@ print("Protokol:", CONFIG["model"], MODE, "seed", SEED, "batch", CONFIG["trainin
     code("training", '''# Satu pemanggilan = satu eksperimen, tanpa loop seed/model.
 SUMMARY = run_experiment(CONFIG)
 ''')
-    md("results-heading", "## Ringkasan dan Unduh Hasil\nUnduh ZIP, best.pt, dan CSV epoch. Kaggle: Save Version menyimpan /kaggle/working. Teacher untuk run KD berikutnya dapat dipasang sebagai Kaggle Input. Colab: unduh hasil sebelum session berakhir.")
+    md("results-heading", "## Ringkasan dan Unduh Hasil\nUnduh best.pt dan CSV epoch. Kaggle Save Version menyimpan folder output. ZIP opsional lewat CREATE_RESULTS_ZIP=True. Gunakan teacher best.pt yang sama sebagai Input seluruh KD full. Colab: unduh hasil sebelum session berakhir.")
     code("results", '''RUN_DIR = Path(SUMMARY["run_dir"])
 print(f"Best epoch {SUMMARY['best_epoch']} | best.pt: {SUMMARY['best_pt']}", flush=True)
-print("mAP50-95:", SUMMARY["metrics"]["mAP50_95"], "| COCO area:", SUMMARY["metrics"]["coco_area"], flush=True)
-display_history = pd.read_csv(RUN_DIR / "epoch_history.csv")
-print(display_history.to_string(index=False), flush=True)
-RESULT_ZIP = create_results_zip(RUN_DIR, OUTPUT_ROOT)
+print("mAP50-95:", SUMMARY["metrics"]["mAP50_95"], flush=True)
+if EVALUATE_COCO_AREA:
+    print("COCO area:", SUMMARY["metrics"]["coco_area"], flush=True)
+RESULT_ZIP = create_results_zip(RUN_DIR, OUTPUT_ROOT) if CREATE_RESULTS_ZIP else None
 try:
     from IPython.display import display, FileLink
-    for result_path in (RESULT_ZIP, RUN_DIR / "weights" / "best.pt", RUN_DIR / "epoch_history.csv", RUN_DIR / "checkpoint_manifest.csv"):
-        display(FileLink(str(result_path)))
+    for result_path in (RUN_DIR / "weights" / "best.pt", RUN_DIR / "epoch_history.csv", RUN_DIR / "checkpoint_manifest.csv", RESULT_ZIP):
+        if result_path is not None:
+            display(FileLink(str(result_path)))
 except ImportError:
-    print("Hasil:", RESULT_ZIP, flush=True)
+    print("Folder hasil:", RUN_DIR, flush=True)
 
 # Opsional Colab: uncomment untuk langsung mengunduh ZIP.
 # from google.colab import files
-# files.download(str(RESULT_ZIP))
+# if RESULT_ZIP is not None:
+#     files.download(str(RESULT_ZIP))
 ''')
     digest = hashlib.sha256("\n".join("".join(cell["source"]) for cell in cells if cell["cell_type"] == "code").encode()).hexdigest()
     for cell in cells:

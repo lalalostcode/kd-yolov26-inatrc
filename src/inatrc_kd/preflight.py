@@ -103,7 +103,8 @@ def _validate_python_torch_pair(torch_version: str, vision_version: str, python_
     return torch_pair, vision_pair
 
 
-def environment_report(device: str = "cpu", require_gpu: bool = False) -> dict[str, Any]:
+def environment_report(device: str = "cpu", require_gpu: bool = False,
+                       dependency_checks: list[dict] | None = None) -> dict[str, Any]:
     """Check the active interpreter, Torch/CUDA, and torchvision NMS on the requested device."""
     import torch
     selected = _device(device, require_gpu)
@@ -124,7 +125,7 @@ def environment_report(device: str = "cpu", require_gpu: bool = False) -> dict[s
     for package, expected in (("ultralytics", "8.4.155"), ("wandb", "0.28.1")):
         if versions[package] != expected:
             raise RuntimeError(f"Expected {package}=={expected}; active version is {versions[package]!r}.")
-    requirement_checks = _validate_runtime_requirements()
+    requirement_checks = _validate_runtime_requirements() if dependency_checks is None else dependency_checks
     report: dict[str, Any] = {
         "python": platform.python_version(),
         "python_executable": sys.executable,

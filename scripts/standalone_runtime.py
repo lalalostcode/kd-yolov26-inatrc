@@ -104,8 +104,14 @@ def _setup_validate_requirements(packages):
     """Periksa dependency aplikasi aktif; tool lain bawaan Kaggle tidak dilatih."""
     from packaging.requirements import Requirement
 
-    checked = []
-    for package in packages:
+    checked, visited = [], set()
+    pending = list(packages)
+    # Periksa dependency transitif juga sebelum memutuskan melewati resolver.
+    for package in pending:
+        normalized = re.sub(r"[-_.]+", "-", package).lower()
+        if normalized in visited:
+            continue
+        visited.add(normalized)
         for declaration in importlib.metadata.requires(package) or []:
             requirement = Requirement(declaration)
             if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
@@ -117,6 +123,7 @@ def _setup_validate_requirements(packages):
             if not requirement.specifier.contains(installed, prereleases=True):
                 raise RuntimeError(f"Dependency {package} tidak sesuai: {declaration}; aktif {installed}.")
             checked.append({"package": package, "requirement": declaration, "active_version": installed})
+            pending.append(requirement.name)
     return checked
 
 
@@ -131,25 +138,37 @@ def setup_dependencies(requirements, output_root):
     report_path = logs / "pip_plan.json"
     constraints = logs / "protected_torch.txt"
     started = time.perf_counter()
-    print("Instalasi dependency: memeriksa rencana pip...", flush=True)
+    print("Instalasi dependency: memeriksa versi dan kompatibilitas...", flush=True)
     with log_path.open("a", encoding="utf-8") as log:
         log.write("\n=== Instalasi dependency ===\n")
     try:
         before = {name: _setup_package_snapshot(name) for name in ("torch", "torchvision")}
-        validate_loaded_packages(["torch", "torchvision", *[name for name, _ in pins.values()]])
-        constraints.write_text(
-            "".join(f"{name}=={info['version']}\n" for name, info in before.items()), encoding="utf-8"
-        )
-        # Report hanya memuat rencana; belum ada package yang diubah di sini.
-        command = [
-            sys.executable, "-m", "pip", "install", "--dry-run", "--report", str(report_path),
-            "--constraint", str(constraints), "--only-binary=faster-coco-eval",
-            "--disable-pip-version-check", *[f"{name}=={version}" for name, version in pins.values()],
-        ]
-        _setup_run_command(command, log_path)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        # Simpan versi report yang sudah disanitasi, bukan environment/credential.
-        report_path.write_text(_setup_redact(json.dumps(report, indent=2)), encoding="utf-8")
+        validate_loaded_packages(["torch", "torchvision"])
+        # Version yang cocok belum cukup: dependency graph juga harus valid.
+        checked = None
+        try:
+            available = {name: _setup_package_snapshot(name) for name, _ in pins.values()}
+            if all(available[name]["version"] == version for name, version in pins.values()):
+                checked = _setup_validate_requirements(["torch", "torchvision", *available])
+        except (importlib.metadata.PackageNotFoundError, RuntimeError):
+            pass  # Paket hilang/konflik: resolver pip tetap diperlukan.
+        if checked is not None:
+            report = {"install": [], "resolution_skipped": True}
+            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        else:
+            constraints.write_text(
+                "".join(f"{name}=={info['version']}\n" for name, info in before.items()), encoding="utf-8"
+            )
+            # Report hanya memuat rencana; belum ada package yang diubah di sini.
+            command = [
+                sys.executable, "-m", "pip", "install", "--dry-run", "--report", str(report_path),
+                "--constraint", str(constraints), "--only-binary=faster-coco-eval",
+                "--disable-pip-version-check", *[f"{name}=={version}" for name, version in pins.values()],
+            ]
+            _setup_run_command(command, log_path)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            # Simpan versi report yang sudah disanitasi, bukan environment/credential.
+            report_path.write_text(_setup_redact(json.dumps(report, indent=2)), encoding="utf-8")
         install_pins = []
         for item in report.get("install", []):
             metadata = item["metadata"]
@@ -178,7 +197,8 @@ def setup_dependencies(requirements, output_root):
                 raise RuntimeError(f"Versi {name} tidak sesuai pin {version}.")
         validate_loaded_packages(["torch", "torchvision", *installed])
         # --no-deps tetap harus menghasilkan dependency graph aplikasi yang konsisten.
-        checked = _setup_validate_requirements(["torch", "torchvision", *installed])
+        if checked is None:
+            checked = _setup_validate_requirements(["torch", "torchvision", *installed])
         elapsed = round(time.perf_counter() - started, 3)
         print(f"Instalasi dependency selesai: {elapsed:.1f} detik. Log: {log_path}", flush=True)
         with log_path.open("a", encoding="utf-8") as log:

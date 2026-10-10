@@ -12,7 +12,14 @@ def native_train_kwargs(config: dict) -> dict:
     checkpoint = kd.get("teacher_checkpoint")
     if not checkpoint:
         raise ValueError(f"{config.get('method', 'native')} KD requires kd.teacher_checkpoint pointing to a local YOLO26m best.pt.")
-    teacher = check_teacher(checkpoint)
+    benchmark = bool(config.get("benchmark_test", False))
+    teacher = check_teacher(checkpoint, expected_nc=80) if benchmark else check_teacher(checkpoint)
+    if benchmark:
+        evidence = teacher.get("benchmark_metadata") or {}
+        if (evidence.get("status") != "PASS" or evidence.get("stage") != "teacher"
+                or evidence.get("dataset") != "coco8.yaml" or evidence.get("seed") != 42
+                or evidence.get("completed_epochs") != 1 or evidence.get("optimizer_updates", 0) < 1):
+            raise ValueError("Benchmark KD requires the trained COCO8 teacher checkpoint from notebook 01, not raw pretrained/synthetic weights.")
     # Urutan ID kelas harus sama agar target teacher cocok dengan label student.
     expected_names = ordered_names(config["dataset"]["names"])
     if teacher["names"] != expected_names:

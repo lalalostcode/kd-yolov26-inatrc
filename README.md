@@ -4,6 +4,8 @@ Repository skripsi dengan fondasi Tahap A dan **implementasi/pilot Tahap B**: au
 
 **Periksa `MODE` sebelum Run All:** notebook teacher, baseline, dan Native KD default **full**; CrossKD/CSAKD default **smoke**. Semua memakai seed 42 dan W&B disabled. Pengujian implementasi dibatasi pada smoke sintetis satu epoch; full training dan multiseed tidak dijalankan oleh pengembang.
 
+Untuk memeriksa pipeline terlebih dahulu dengan data/pretrained nyata, gunakan **`BENCHMARK_TEST = True`** pada notebook yang sama. Mode ini menjalankan COCO8 satu epoch dan mengabaikan `MODE`/dataset InaTRC. **Sembilan kondisi lolos pada CPU lokal; Kaggle GPU belum diuji.** Hasil dan batasnya ada di [laporan COCO8](docs/coco8_benchmark.md).
+
 Notebook mandiri telah diaudit untuk mengurangi pemeriksaan berulang. Setup yang sudah cocok melewati resolver pip; audit lengkap tetap dijalankan setiap run, lalu integritas diperiksa kembali dari seluruh byte file. COCO area dan ZIP menjadi opsi, default nonaktif. Logging per epoch dan best epoch tetap aktif. Perubahan, pengukuran lokal, dan hasil test terbaru ada di [laporan penyederhanaan](docs/standalone_optimization.md); panduan umum ada di [laporan notebook mandiri](docs/standalone_notebooks.md). GPU Kaggle/Colab belum diuji.
 
 Audit referensi awal ada dalam [docs/audit.md](docs/audit.md). Native memakai API resmi Ultralytics; CrossKD/CSAKD memakai adaptasi yang dijelaskan di [desain Tahap B](docs/stage_b_design.md). Default CSAKD mengikuti persamaan paper; varian fungsi loss kode penulis tersedia secara eksplisit. Bobot KD custom masih bobot pilot, belum konfigurasi final InaTRC. Hasil terkini ada dalam [laporan Tahap B](docs/stage_b_report.md).
@@ -74,6 +76,18 @@ Lock memilih Torch/Torchvision **CPU** secara eksplisit untuk verifikasi lokal; 
 | 07 | [CrossKD n](notebooks/standalone/07_crosskd_yolo26n.ipynb) | YOLO26n | crosskd | smoke |
 | 08 | [CSAKD s](notebooks/standalone/08_csakd_yolo26s.ipynb) | YOLO26s | csakd | smoke |
 | 09 | [CSAKD n](notebooks/standalone/09_csakd_yolo26n.ipynb) | YOLO26n | csakd | smoke |
+
+### Benchmark COCO8 sebelum eksperimen InaTRC
+
+1. Upload notebook **01**, aktifkan GPU dan Internet, lalu isi `BENCHMARK_TEST = True`, `DEVICE = "0"`, `SEED = 42`. Tidak perlu Add Input InaTRC atau mengubah `MODE`. COCO8 dan pretrained YOLO26m resmi diunduh jika belum tersedia.
+2. Run All menyelesaikan **1 epoch, 320 px, batch 2, workers 0**, lalu memuat ulang `best.pt` untuk validation COCO8. Hasil diberi label **benchmark diagnostic / nonfinal**. PASS mencantumkan device aktual dan hanya diberikan setelah loss/gradient finite, optimizer update, serta checkpoint reload/val berhasil.
+3. Save Version hasil teacher. Lampirkan `weights/best.pt` sebagai Kaggle Input pada **04–09**, isi `TEACHER_CKPT` dengan path **checkpoint yang sama**, lalu pilih `BENCHMARK_TEST = True`. `TEACHER_SHA256` opsional untuk mengunci hash. Raw pretrained YOLO26m dan teacher sintetis tidak diterima sebagai teacher benchmark terlatih.
+4. Jalankan **02/03** dengan `BENCHMARK_TEST = True` untuk baseline s/n; teacher tidak diperlukan. Setiap notebook tetap menjalankan satu kondisi, tanpa loop atau retry training.
+5. Benchmark memakai 80 kelas, 4 train/4 val, tanpa split test/audit InaTRC, evaluasi COCO area, profil model, ZIP, atau login W&B. Logger epoch yang sudah ada tetap menunjukkan loss KD dan best epoch. AMP off, warmup 0, dan `nbs=2` adalah pilihan diagnostik agar optimizer benar-benar melakukan update. Tidak ada fallback CPU otomatis pada Kaggle.
+
+Set `BENCHMARK_TEST = False` untuk kembali ke protokol InaTRC semula. [COCO8 resmi](https://docs.ultralytics.com/datasets/detect/coco8/) adalah dataset debugging, bukan dasar kesimpulan kualitas KD. Paket pip dan Torch/torchvision CUDA bawaan tetap mengikuti setup notebook yang ada. Periksa [tabel hasil aktual dan blocker](docs/coco8_benchmark.md) sebelum menyatakan benchmark GPU berhasil.
+
+### Eksperimen InaTRC
 
 1. Upload **satu** notebook ke Kaggle, aktifkan GPU dan Internet, lalu tambahkan dataset InaTRC melalui **Add Input**. Untuk memeriksa setup dahulu, pilih **03 Baseline n** dan ubah `MODE = "smoke"`.
 2. Baca **Konfigurasi Eksperimen**. Stage/model/metode sudah sesuai nama notebook; isi `DATASET_ROOT` jika deteksi otomatis menemukan lebih dari satu dataset, pilih device/W&B, dan isi `TEACHER_CKPT` untuk KD full. Teacher tetap seed 42; seed student dapat diganti.

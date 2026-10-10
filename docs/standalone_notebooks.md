@@ -22,6 +22,8 @@ Setiap notebook menjalankan tepat satu eksperimen. Seed default 42, W&B disabled
 
 Penyederhanaan terbaru beserta pengukuran/test ada di [laporan audit dan optimasi](standalone_optimization.md). Teacher terkunci pada seed 42; seed student tetap bisa diganti. `EVALUATE_COCO_AREA = False` dan `CREATE_RESULTS_ZIP = False` adalah default baru untuk seluruh notebook. Gunakan opsi COCO yang sama di semua eksperimen yang dibandingkan.
 
+Pilihan tambahan `BENCHMARK_TEST = True` menjalankan COCO8 resmi dengan pretrained YOLO26, 80 kelas, satu epoch, 320 px/batch 2/workers 0, seed 42. Ia mengabaikan `MODE` dan konfigurasi dataset InaTRC; semua KD memakai teacher hasil benchmark notebook 01. Hasil CPU dan instruksi GPU ada di [laporan COCO8](coco8_benchmark.md). Default flag False mempertahankan jalur InaTRC; tidak ada clone/uv/import repository atau notebook tambahan.
+
 ## Urutan cell
 
 Heading memakai Bahasa Indonesia dan komentar singkat. Fungsi/kelas ditampilkan sebagai kode Python biasa dan didefinisikan sebelum cell yang memanggilnya.

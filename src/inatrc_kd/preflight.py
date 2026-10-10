@@ -416,8 +416,8 @@ def ordered_names(names) -> list[str]:
     raise ValueError("Class names must be a list or an indexed mapping.")
 
 
-def check_teacher(path) -> dict[str, Any]:
-    """Validate a local YOLO26m checkpoint with five classes and return its provenance."""
+def check_teacher(path, *, expected_nc: int = 5) -> dict[str, Any]:
+    """Teacher InaTRC tetap lima kelas; diagnostik COCO8 meminta 80 secara eksplisit."""
     from ultralytics import YOLO
 
     checkpoint_path = Path(path).expanduser().resolve()
@@ -433,17 +433,17 @@ def check_teacher(path) -> dict[str, Any]:
         family not in {"yolo26", "yolo26m"}
         or scale != "m"
         or teacher.task != "detect"
-        or int(head.nc) != 5
+        or int(head.nc) != expected_nc
         or int(head.reg_max) != 1
         or getattr(head, "one2one_cv2", None) is None
     ):
         raise ValueError(
-            f"Teacher must be YOLO26m fine-tuned for five classes; "
+            f"Teacher must be YOLO26m fine-tuned for {expected_nc} classes; "
             f"found YAML={yaml_file!r}, scale={scale!r}, nc={getattr(head, 'nc', None)}."
         )
     names = ordered_names(model.names)
-    if len(names) != 5:
-        raise ValueError(f"Teacher class-name count is {len(names)}; expected five.")
+    if len(names) != expected_nc:
+        raise ValueError(f"Teacher class-name count is {len(names)}; expected {expected_nc}.")
     fingerprint = hashlib.sha256()
     with checkpoint_path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -459,6 +459,7 @@ def check_teacher(path) -> dict[str, Any]:
         "names": names,
         "diagnostics_only": bool(checkpoint.get("inatrc_diagnostics_only", False)),
         "diagnostic_metadata": checkpoint.get("inatrc_diagnostics", None),
+        "benchmark_metadata": checkpoint.get("coco8_benchmark", None),
     }
     return report
 

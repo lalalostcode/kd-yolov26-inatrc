@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -115,6 +116,7 @@ def test_standalone_notebook_schema_syntax_defaults_and_bahasa(standalone_notebo
     config = _literal_config(notebook)
     assert (config["STAGE"], config["STUDENT"], config["METHOD"], config["MODE"]) == expected[1:]
     assert (config["SEED"], config["WANDB_MODE"]) == (42, "disabled")
+    assert config["BENCHMARK_TEST"] is False
     assert config["EVALUATE_COCO_AREA"] is False and config["CREATE_RESULTS_ZIP"] is False
     assert config.get("TEACHER_CKPT") in (None, "")
     markdown = "\n".join(_source(cell) for cell in notebook["cells"] if cell["cell_type"] == "markdown")
@@ -355,6 +357,76 @@ def test_teacher_seed_is_fixed_but_student_seed_can_change(tmp_path):
             assert namespace["make_config"]()["training"]["seed"] == 43
 
 
+def test_coco8_config_bypasses_only_inatrc_requirements(standalone_notebook, tmp_path):
+    expected, notebook = standalone_notebook
+    namespace = _definition_namespace(notebook)
+    namespace.update(BENCHMARK_TEST=True, MODE="full", DEVICE="cpu", SEED=42,
+                     PLATFORM_INFO={"name": "local"}, OUTPUT_ROOT=str(tmp_path),
+                     DATASET_ROOT="/missing/InaTRC", EXPECTED_IMAGES=1,
+                     EVALUATE_COCO_AREA=True, CREATE_RESULTS_ZIP=True,
+                     TEACHER_CKPT="teacher-coco8.pt" if expected[3] != "none" else "")
+    namespace["discover_dataset_root"] = Mock(side_effect=AssertionError("InaTRC discovery forbidden"))
+    namespace["validate_config"] = Mock(side_effect=AssertionError("InaTRC class/split validation forbidden"))
+    config = namespace["make_config"]()
+    scale = "m" if expected[1] == "teacher" else expected[2]
+    assert config["model"] == f"yolo26{scale}.pt" and config["benchmark_test"]
+    assert config["dataset"]["yaml"] == "coco8.yaml" and len(config["dataset"]["names"]) == 80
+    assert config["dataset"]["names"][0] == "person" and config["dataset"]["names"][79] == "toothbrush"
+    assert {key: config["training"][key] for key in ("epochs", "imgsz", "batch", "workers", "seed", "nbs")} == {
+        "epochs": 1, "imgsz": 320, "batch": 2, "workers": 0, "seed": 42, "nbs": 2,
+    }
+    assert config["training"]["amp"] is False and config["tracking"]["mode"] == "disabled"
+    assert not config["evaluation"]["coco_area"] and not config["create_results_zip"]
+    namespace["SEED"] = 43
+    with pytest.raises(ValueError, match="seed 42"):
+        namespace["make_config"]()
+    namespace.update(SEED=42, PLATFORM_INFO={"name": "kaggle"})
+    with pytest.raises(ValueError, match="GPU"):
+        namespace["make_config"]()
+
+
+@pytest.mark.parametrize("filename", ["04_native_yolo26s", "06_crosskd_yolo26s", "08_csakd_yolo26s"])
+def test_coco8_kd_requires_trained_teacher_not_raw_pretrained(filename, tmp_path):
+    notebook = nbformat.read(NOTEBOOK_DIR / f"{filename}.ipynb", as_version=4)
+    namespace = _definition_namespace(notebook)
+    namespace.update(BENCHMARK_TEST=True, DEVICE="cpu", PLATFORM_INFO={"name": "local"}, OUTPUT_ROOT=str(tmp_path))
+    with pytest.raises(ValueError, match="TEACHER_CKPT"):
+        namespace["make_config"]()
+    namespace["TEACHER_CKPT"] = "teacher-coco8.pt"
+    config = namespace["make_config"]()
+    report = {"path": "teacher-coco8.pt", "names": namespace["ordered_names"](config["dataset"]["names"]),
+              "diagnostics_only": False, "benchmark_metadata": None}
+    teacher_check = Mock(return_value=report)
+    namespace["check_teacher"] = teacher_check
+    with pytest.raises(ValueError, match="trained COCO8 teacher"):
+        namespace["configure_kd"](config)
+    teacher_check.assert_called_with(config["kd"]["teacher_checkpoint"], expected_nc=80)
+    report["benchmark_metadata"] = {"status": "PASS", "stage": "teacher", "dataset": "coco8.yaml",
+                                    "seed": 42, "completed_epochs": 1, "optimizer_updates": 2}
+    assert namespace["configure_kd"](config)["distill_model"] == "teacher-coco8.pt"
+
+
+def test_coco8_preserves_default_five_class_teacher_guard(tmp_path):
+    from inatrc_kd.preflight import check_teacher, make_synthetic_teacher
+    teacher = make_synthetic_teacher(tmp_path / "five-class-teacher.pt")
+    assert check_teacher(teacher)["nc"] == 5
+    with pytest.raises(ValueError, match="80 classes"):
+        check_teacher(teacher, expected_nc=80)
+
+
+def test_coco8_run_all_selects_one_branch_and_uses_real_kd(standalone_notebook):
+    expected, notebook = standalone_notebook
+    statement = ast.parse(_source(_cell(notebook, "training"))).body[0]
+    assert isinstance(statement, ast.If) and statement.test.id == "BENCHMARK_TEST"
+    assert statement.body[0].value.func.id == "run_benchmark"
+    assert statement.orelse[0].value.func.id == "run_experiment"
+    namespace = _definition_namespace(notebook)
+    assert namespace["BenchmarkTrainer"].__bases__ == (namespace[
+        "CustomKDTrainer" if expected[3] in {"crosskd", "csakd"} else "SafeDetectionTrainer"],)
+    assert namespace["BenchmarkTrainer"].build_dataset is namespace["DetectionTrainer"].build_dataset
+    assert namespace["BenchmarkTrainer"].get_validator is namespace["DetectionTrainer"].get_validator
+
+
 @pytest.mark.parametrize("expected", EXPECTED[3:], ids=[row[0] for row in EXPECTED[3:]])
 def test_inline_kd_only_gradient_teacher_and_optimizer(expected):
     import torch
@@ -401,7 +473,7 @@ def test_inline_kd_only_gradient_teacher_and_optimizer(expected):
     assert hooks() == 0
 
 
-# Harness mengubah mode saja; seluruh definisi training/KD berasal dari notebook yang disalin.
+# Harness memilih smoke CPU/benchmark; seluruh definisi training/KD berasal dari notebook yang disalin.
 # exec diperlukan oleh test harness untuk menjalankan cell, tidak ditanam dalam notebook.
 ISOLATED_HARNESS = r'''
 import builtins
@@ -461,19 +533,22 @@ for cell in notebook["cells"]:
             if name in namespace:
                 namespace[name] = measured(namespace[name], name)
     if cell["id"] == "config":
+        benchmark = os.environ.get("TEST_COCO8_BENCHMARK", "0") == "1"
         namespace.update(MODE="smoke", DEVICE="cpu", WANDB_MODE="disabled", SEED=42,
-                         DATASET_ROOT="", TEACHER_CKPT="", MODEL_WEIGHTS=None,
+                         BENCHMARK_TEST=benchmark, DATASET_ROOT="",
+                         TEACHER_CKPT=os.environ.get("TEST_BENCHMARK_TEACHER", "") if benchmark else "",
+                         MODEL_WEIGHTS=os.environ.get("TEST_BENCHMARK_WEIGHTS") if benchmark else None,
                          INPUT_ROOT=str(root / "inputs"), OUTPUT_ROOT=str(root / "outputs"))
         namespace["EVALUATE_COCO_AREA"] = os.environ.get("TEST_OPTIONAL_COCO", "0") == "1"
         namespace["CREATE_RESULTS_ZIP"] = os.environ.get("TEST_OPTIONAL_ZIP", "0") == "1"
         (root / "inputs").mkdir(exist_ok=True)
-summary_path = root / "outputs" / "latest_run.json"
+summary_path = root / "outputs" / ("benchmark_latest.json" if benchmark else "latest_run.json")
 assert summary_path.is_file(), "Notebook did not complete one experiment."
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
 run = Path(summary["run_dir"])
-metadata = json.loads((run / "metadata.json").read_text(encoding="utf-8"))
+metadata = summary if benchmark else json.loads((run / "metadata.json").read_text(encoding="utf-8"))
 profile = {"stages": stage_profile, "process_seconds": time.perf_counter() - process_started,
-           "training_seconds": metadata["training_seconds"], "metrics": summary["metrics"],
+           "training_seconds": metadata.get("training_seconds", metadata.get("duration_seconds")), "metrics": summary["metrics"],
            "initial_student_state_sha256": metadata["initial_student_state_sha256"],
            "files": sorted(str(path.relative_to(run)) for path in run.rglob("*") if path.is_file())}
 (root / "outputs" / "test_profile.json").write_text(json.dumps(profile, indent=2), encoding="utf-8")
@@ -579,3 +654,80 @@ def test_standalone_smoke_runs_outside_checkout_without_repo_import(expected, tm
         assert profile["stages"]["audit_dataset"]["calls"] == 1
         assert profile["stages"]["verify_dataset_unchanged"]["calls"] == 1
         assert profile["stages"]["_verify_image"]["calls"] == 20
+
+
+def _execute_coco8_notebook(expected, root, log_dir, teacher=None):
+    """Pemakaian ulang harness notebook yang ada dengan input COCO8/pretrained nyata."""
+    assets = REPO_ROOT / "outputs" / "coco8-benchmark" / "assets"
+    scale = "m" if expected[1] == "teacher" else expected[2]
+    (root / "experiment.ipynb").write_bytes((NOTEBOOK_DIR / f"{expected[0]}.ipynb").read_bytes())
+    (root / "run_notebook.py").write_text(ISOLATED_HARNESS, encoding="utf-8")
+    (root / "inputs").mkdir()
+    weights = root / "inputs" / f"yolo26{scale}.pt"
+    shutil.copy2(assets / weights.name, weights)
+    shutil.copytree(assets / "coco8", root / "outputs" / "benchmark_datasets" / "coco8")
+    environment = os.environ.copy()
+    for key in ("PYTHONPATH", "WANDB_API_KEY", "TEST_OPTIONAL_COCO", "TEST_OPTIONAL_ZIP"):
+        environment.pop(key, None)
+    environment.update(PYTHONUTF8="1", TEST_COCO8_BENCHMARK="1", TEST_BENCHMARK_WEIGHTS=str(weights),
+                       TEST_BENCHMARK_TEACHER=str(teacher or ""))
+    completed = subprocess.run([sys.executable, "-I", "run_notebook.py"], cwd=root, env=environment,
+                               text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=300)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = log_dir / f"{expected[0]}-coco8.log"
+    log.write_text(completed.stdout + "\n" + completed.stderr, encoding="utf-8")
+    assert completed.returncode == 0, f"COCO8 CPU failed: {log}\n{log.read_text(encoding='utf-8')[-10000:]}"
+    summary = json.loads((root / "outputs" / "benchmark_latest.json").read_text(encoding="utf-8"))
+    (log_dir / f"{expected[0]}-coco8.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    assert summary["status"] == "PASS" and summary["runtime"] == "cpu" and summary["nonfinal"]
+    assert summary["nc"] == 80 and (summary["train_images"], summary["val_images"]) == (4, 4)
+    assert summary["completed_epochs"] == 1 and summary["best_epoch"] == 1
+    assert summary["optimizer_updates"] == summary["gradient_steps"] == summary["loss_batches"] == 2
+    assert summary["validation_reloaded"] and not summary["test_evaluated"]
+    run = Path(summary["run_dir"])
+    assert len(_csv_rows(run / "epoch_history.csv")) == len(_csv_rows(run / "results.csv")) == 1
+    assert not list((root / "outputs").rglob("*coco_metrics*")) and not list((root / "outputs").rglob("*.zip"))
+    assert not (run / "reports").exists() and not (run / "complexity.json").exists()
+    profile = json.loads((root / "outputs" / "test_profile.json").read_text(encoding="utf-8"))
+    for name in ("audit_dataset", "verify_dataset_unchanged", "_verify_image", "evaluate_checkpoint", "create_results_zip", "make_synthetic_teacher"):
+        assert name not in profile["stages"], f"Benchmark invoked InaTRC/optional stage {name}"
+    import torch
+    from ultralytics import YOLO
+    checkpoint = YOLO(summary["best_pt"])
+    assert checkpoint.model.model[-1].nc == 80
+    assert not hasattr(checkpoint.model, "teacher_model") and not hasattr(checkpoint.model, "projector")
+    assert checkpoint.ckpt["coco8_benchmark"]["status"] == "PASS"
+    if expected[3] != "none":
+        assert summary["teacher_frozen"] and summary["teacher_state_unchanged"] and summary["kd_loss_batches"] == 2
+        assert summary["teacher_checkpoint_sha256"] == hashlib.sha256(Path(teacher).read_bytes()).hexdigest()
+    return summary
+
+
+@pytest.fixture(scope="module")
+def trained_coco8_teacher():
+    assets = REPO_ROOT / "outputs" / "coco8-benchmark" / "assets"
+    if not all((assets / name).exists() for name in ("yolo26m.pt", "yolo26s.pt", "yolo26n.pt", "coco8")):
+        pytest.skip("COCO8 benchmark needs the official downloaded assets; tests never download them automatically")
+    with tempfile.TemporaryDirectory(prefix="inatrc-coco8-teacher-") as location:
+        root = Path(location)
+        assert REPO_ROOT not in root.parents
+        summary = _execute_coco8_notebook(EXPECTED[0], root, REPO_ROOT / "outputs/coco8-benchmark/smoke-results")
+        yield summary
+
+
+_COCO8_INITIAL_STATES = {}
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("expected", EXPECTED, ids=[row[0] for row in EXPECTED])
+def test_coco8_benchmark_cpu_outside_checkout(expected, trained_coco8_teacher):
+    if expected[1] == "teacher":
+        assert trained_coco8_teacher["status"] == "PASS"
+        return
+    with tempfile.TemporaryDirectory(prefix="inatrc-coco8-student-") as location:
+        root = Path(location)
+        assert REPO_ROOT not in root.parents
+        teacher = trained_coco8_teacher["best_pt"] if expected[3] != "none" else None
+        summary = _execute_coco8_notebook(expected, root, REPO_ROOT / "outputs/coco8-benchmark/smoke-results", teacher)
+        previous = _COCO8_INITIAL_STATES.setdefault(expected[2], summary["initial_student_state_sha256"])
+        assert previous == summary["initial_student_state_sha256"]

@@ -3,7 +3,6 @@
 import ast
 import os
 from pathlib import Path
-import subprocess
 import sys
 import types
 import nbformat
@@ -55,13 +54,14 @@ def _uncomment_block(source, marker):
 
 
 def _secret_setup(notebook, *, uncomment=False):
-    source = next(cell for cell in _code(notebook) if cell.startswith('if WANDB_MODE == "online"'))
+    source = next(cell for cell in _code(notebook) if "COLAB SECRET BEGIN" in cell)
     if uncomment:
         source = _uncomment_block(source, "COLAB SECRET")
     # Execute only Secrets setup; dataset/preflight/training are excluded.
     tree = ast.parse(source)
-    assert all(isinstance(node, ast.If) for node in tree.body[:2])
-    return compile(ast.Module(body=tree.body[:2], type_ignores=[]), "runner-secrets", "exec")
+    stage = next(node for node in tree.body if isinstance(node, ast.With))
+    assert all(isinstance(node, ast.If) for node in stage.body[:2])
+    return compile(ast.Module(body=stage.body[:2], type_ignores=[]), "runner-secrets", "exec")
 
 
 def test_colab_commented_paths_override_config_and_share_setup(notebook):
@@ -228,43 +228,9 @@ def test_runner_preserves_kaggle_torch_and_uses_explicit_uv_environment(notebook
     assert "pip install torch" not in source
 
 
-def test_git_download_fetches_only_requested_commit_and_reuses_checkout(notebook, tmp_path):
-    # Exercise the actual notebook Git block against a local URL; no GitHub/network/push.
-    tree = ast.parse(next(source for source in _code(notebook) if "def source_files" in source))
-    selected = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
-                    and isinstance(node.test, ast.UnaryOp) and isinstance(node.test.op, ast.Not)
-                    and isinstance(node.test.operand, ast.Call)
-                    and isinstance(node.test.operand.func, ast.Attribute)
-                    and node.test.operand.func.attr == "exists"
-                    and isinstance(node.test.operand.func.value, ast.Name)
-                    and node.test.operand.func.value.id == "REPO")
-    commit = subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
-    checkout = tmp_path / "checkout"
-    commands = []
-
-    def run(command, **kwargs):
-        commands.append(command)
-        return subprocess.run(command, **kwargs)
-
-    namespace = {"REPO": checkout, "REPO_URL": REPO_ROOT.as_uri(), "REPO_COMMIT": commit,
-                 "subprocess": types.SimpleNamespace(run=run)}
-    code = compile(ast.Module(body=[selected], type_ignores=[]), "runner-git", "exec")
-    exec(code, namespace)
-    assert [command[1] for command in commands] == ["init", "fetch", "checkout"]
-    fetch = commands[1]
-    assert "--no-tags" in fetch and "--depth" in fetch
-    assert fetch[fetch.index("--depth") + 1] == "1"
-    assert fetch[-1] == commit
-    assert subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip() == commit
-    assert subprocess.check_output(["git", "-C", str(checkout), "rev-list", "--count", "HEAD"], text=True).strip() == "1"
-    assert subprocess.check_output(["git", "-C", str(checkout), "remote"], text=True).strip() == ""
-    exec(code, namespace)
-    assert len(commands) == 3  # Repeating setup does not fetch an existing checkout again.
-
-
 def test_source_fingerprint_prunes_venv_cache_and_secret_directories(notebook, tmp_path):
     tree = ast.parse(next(source for source in _code(notebook) if "def source_files" in source))
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "source_files"]
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "source_files"]
     ignored = {".git", ".venv", ".uv-cache", ".cache", "outputs"}
     for folder in sorted(ignored):
         path = tmp_path / folder / "nested"

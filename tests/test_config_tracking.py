@@ -1,5 +1,6 @@
 """Protocol, method gates and tracking regressions without model training."""
 
+import json
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -152,6 +153,8 @@ def test_epoch_metrics_do_not_require_epoch_checkpoint_files(tmp_path):
     assert len(pd.read_csv(tmp_path / "epoch_history.csv")) == 1
     history = recorder.rows[0]
     assert history["epoch"] == 1
+    assert history["checkpoint/best_epoch"] == 1
+    assert history["checkpoint/is_best"] is True
     assert history["per_class/1/AP50_95"] == pytest.approx(0.3)
     assert "per_class/0/AP50_95" not in history
     assert not any(key.startswith("system/gpu_") for key in history)
@@ -166,6 +169,52 @@ def test_fit_event_without_a_saved_epoch_is_ignored(tmp_path):
     recorder.on_fit_epoch_end(_trainer(tmp_path))
     assert not recorder.rows
     tracker.log.assert_not_called()
+
+
+def test_tied_fitness_reports_last_best_checkpoint_epoch_and_no_final_duplicate(tmp_path, capsys):
+    config = load_config()
+    config["training"]["epochs"] = 10
+    tracker = Mock()
+    recorder = EpochRecorder(config, tmp_path, tracker)
+    for epoch, fitness in enumerate((0.25, 0.2, 0.25)):
+        trainer = _trainer(tmp_path, epoch=epoch, fitness=fitness, best_fitness=0.25)
+        recorder.on_epoch_start(trainer)
+        recorder.on_save(trainer)
+        recorder.on_fit_epoch_end(trainer)
+    recorder.on_fit_epoch_end(trainer)  # final_eval invokes the callback after training.
+    assert tracker.log.call_count == 3
+    assert recorder.best_epoch == 3
+    assert [row["checkpoint/is_best"] for row in recorder.rows] == [True, False, True]
+    assert [row["checkpoint/best_epoch"] for row in recorder.rows] == [1, 1, 3]
+    checkpoint_history = pd.read_csv(tmp_path / "checkpoint_manifest.csv")
+    assert checkpoint_history["best_epoch"].tolist() == [1, 1, 3]
+    assert checkpoint_history["is_best_at_save"].tolist() == [True, False, True]
+    output = capsys.readouterr().out
+    assert output.count("best.pt diperbarui:") == 3
+    assert "Epoch 3/10 | mAP50-95 0.25000 | Best epoch 3 | best.pt diperbarui: ya" in output
+    results = tmp_path / "results.csv"
+    pd.DataFrame({"epoch": [1, 2, 3], "metrics/mAP50-95(B)": [0.25, 0.2, 0.25]}).to_csv(results, index=False)
+    summary = recorder.verify(results)
+    assert summary == {"completed_epochs": 3, "best_epoch": 3, "best_fitness": 0.25, "early_stopped": True}
+    assert json.loads((tmp_path / "training_summary.json").read_text()) == summary
+
+
+def test_disabled_tracker_keeps_local_history_and_console_transparency(monkeypatch, tmp_path, capsys):
+    module, run, _ = _fake_wandb(monkeypatch)
+    config = load_config()
+    tracker = ExperimentTracker(config, tmp_path)
+    tracker.start({})
+    recorder = EpochRecorder(config, tmp_path, tracker)
+    trainer = _trainer(tmp_path)
+    recorder.on_epoch_start(trainer)
+    recorder.on_save(trainer)
+    recorder.on_fit_epoch_end(trainer)
+    assert (tmp_path / "epoch_history.csv").is_file()
+    assert (tmp_path / "checkpoint_manifest.csv").is_file()
+    assert "Epoch 1/1" in capsys.readouterr().out
+    module.login.assert_not_called()
+    module.init.assert_not_called()
+    run.log.assert_not_called()
 
 
 @pytest.mark.parametrize("method, has_kd_column, fails", [
@@ -197,7 +246,8 @@ def test_nonfinite_epoch_scalars_fail_loudly(tmp_path, invalid):
 
 def _fake_wandb(monkeypatch):
     run = SimpleNamespace(id="test-run", url="https://wandb.invalid/run", summary={},
-                          log=Mock(), log_artifact=Mock(return_value=SimpleNamespace(wait=Mock())), finish=Mock())
+                          log=Mock(), define_metric=Mock(),
+                          log_artifact=Mock(return_value=SimpleNamespace(wait=Mock())), finish=Mock())
     artifacts = []
 
     def artifact(name, type, metadata=None):
@@ -230,7 +280,18 @@ def test_online_tracker_has_one_run_and_final_best_artifact(monkeypatch, tmp_pat
     monkeypatch.setenv("WANDB_API_KEY", "test-secret-never-print")
     (tmp_path / "weights").mkdir()
     (tmp_path / "weights" / "best.pt").write_bytes(b"fixture checkpoint")
+    (tmp_path / "weights" / "last.pt").write_bytes(b"fixture final checkpoint")
     (tmp_path / "metrics.json").write_text("{}", encoding="utf-8")
+    final_files = ("epoch_history.csv", "checkpoint_manifest.csv", "checkpoint_audit.json", "complexity.json",
+                   "coco_area.json", "coco_metrics.csv", "metrics.csv", "results.png")
+    for name in final_files:
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    cache = tmp_path / "validation" / "best-val" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "dataset.cache").write_bytes(b"loader cache is not a result")
+    (tmp_path / "training_summary.json").write_text(json.dumps({
+        "best_epoch": 3, "best_fitness": 0.25, "completed_epochs": 4, "early_stopped": False,
+    }), encoding="utf-8")
     tracker = ExperimentTracker(load_config(wandb_mode="online"), tmp_path)
     tracker.start({"nonfinal": True})
     tracker.log({"epoch": 1, "loss": 1.0}, step=1)
@@ -242,8 +303,19 @@ def test_online_tracker_has_one_run_and_final_best_artifact(monkeypatch, tmp_pat
     assert run.summary["research/status"] == "completed"
     assert run.summary["research/test_evaluated"] is False
     assert run.summary["validation/mAP50_95"] == 0.25
+    assert run.summary["checkpoint/best_epoch"] == 3
+    assert run.summary["fit/best_fitness"] == 0.25
+    assert run.summary["fit/completed_epochs"] == 4
+    assert run.define_metric.call_args_list[0].args == ("epoch",)
+    assert run.define_metric.call_args_list[1].args == ("*",)
+    assert run.define_metric.call_args_list[1].kwargs == {"step_metric": "epoch"}
     assert len(artifacts) == 1
-    assert any(call.kwargs.get("name") == "weights/best.pt" for call in artifacts[0].add_file.call_args_list)
+    uploaded_names = {call.kwargs["name"] for call in artifacts[0].add_file.call_args_list}
+    assert {"weights/best.pt", "weights/last.pt", "training_summary.json", *final_files} <= uploaded_names
+    assert "validation/best-val/cache/dataset.cache" not in uploaded_names
+    assert artifacts[0].metadata["best_epoch"] == 3
+    assert artifacts[0].metadata["best_fitness"] == 0.25
+    assert artifacts[0].metadata["completed_epochs"] == 4
     assert run.log_artifact.call_args.kwargs["aliases"] == ["best-checkpoint", "final"]
     run.log_artifact.return_value.wait.assert_called_once()
     run.finish.assert_called_once_with(exit_code=0)
@@ -263,13 +335,14 @@ def test_online_missing_secret_and_duplicate_run_fail_before_init(monkeypatch, t
 
 
 def test_failed_run_closes_once_and_does_not_upload_final_model(monkeypatch, tmp_path):
-    _, run, artifacts = _fake_wandb(monkeypatch)
+    module, run, artifacts = _fake_wandb(monkeypatch)
     tracker = ExperimentTracker(load_config(wandb_mode="offline"), tmp_path)
     tracker.start({})
     tracker.finish("failed", error="diagnostic failure")
     tracker.finish("failed", error="diagnostic failure")  # exception cleanup is idempotent
     assert run.summary["research/status"] == "failed"
     assert run.summary["research/error"] == "diagnostic failure"
+    module.login.assert_not_called()
     run.finish.assert_called_once_with(exit_code=1)
     assert not artifacts
 
@@ -283,4 +356,23 @@ def test_final_artifact_failure_records_failure_and_cleans_up_once(monkeypatch, 
         tracker.finish("completed")
     tracker.finish("failed", error="artifact upload failed")
     assert run.summary["research/status"] == "failed"
+    run.finish.assert_called_once_with(exit_code=1)
+
+
+@pytest.mark.parametrize("upload_failure", [False, True])
+def test_failure_summary_never_stores_wandb_secret(monkeypatch, tmp_path, upload_failure):
+    _, run, _ = _fake_wandb(monkeypatch)
+    monkeypatch.setenv("WANDB_API_KEY", "private-test-credential")
+    tracker = ExperimentTracker(load_config(wandb_mode="offline"), tmp_path)
+    tracker.start({})
+    error = "request failed: private-test-credential"
+    if upload_failure:
+        run.log_artifact.side_effect = RuntimeError(error)
+        with pytest.raises(RuntimeError) as raised:
+            tracker.finish("completed")
+        assert "private-test-credential" not in str(raised.value)
+    else:
+        tracker.finish("failed", error=error)
+    assert "private-test-credential" not in run.summary["research/error"]
+    assert "[REDACTED]" in run.summary["research/error"]
     run.finish.assert_called_once_with(exit_code=1)

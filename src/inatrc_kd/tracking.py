@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import json
 import os
 import time
 from pathlib import Path
@@ -49,6 +50,9 @@ class ExperimentTracker:
         )
         self.run.summary["research/status"] = "running"
         self.run.summary["research/test_evaluated"] = False
+        # Semua kurva memakai epoch sebagai sumbu, bukan jumlah panggilan callback.
+        self.run.define_metric("epoch")
+        self.run.define_metric("*", step_metric="epoch")
 
     def log(self, values: dict, step: int | None = None) -> None:
         if self.run is not None:
@@ -75,8 +79,16 @@ class ExperimentTracker:
         try:
             self.run.summary["research/status"] = status
             self.run.summary["research/test_evaluated"] = False
+            training_summary = {}
+            summary_path = self.run_dir / "training_summary.json"
+            if summary_path.is_file():
+                training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                self.run.summary["checkpoint/best_epoch"] = training_summary["best_epoch"]
+                self.run.summary["fit/best_fitness"] = training_summary["best_fitness"]
+                self.run.summary["fit/completed_epochs"] = training_summary["completed_epochs"]
             if error:
-                self.run.summary["research/error"] = error
+                key = os.getenv("WANDB_API_KEY")
+                self.run.summary["research/error"] = error.replace(key, "[REDACTED]") if key else error
             if metrics is not None:
                 for key in ("mAP50_95", "mAP50", "precision", "recall"):
                     self.run.summary[f"validation/{key}"] = metrics[key]
@@ -84,15 +96,19 @@ class ExperimentTracker:
             if status == "completed":
                 upload_started = time.perf_counter()
                 artifact = wandb.Artifact(f"final-{self.run.id}", type="model",
-                                          metadata={"mode": self.config["mode"], "test_evaluated": False})
-                for name in ("weights/best.pt", "metrics.json", "per_class.csv", "results.csv",
-                             "resolved_config.yaml", "metadata.json", "run_summary.json"):
+                                          metadata={"mode": self.config["mode"], "test_evaluated": False,
+                                                    **training_summary})
+                for name in ("weights/best.pt", "weights/last.pt", "metrics.json", "per_class.csv", "results.csv",
+                             "epoch_history.csv", "checkpoint_manifest.csv", "training_summary.json",
+                             "checkpoint_audit.json", "complexity.json", "resolved_config.yaml",
+                             "coco_area.json", "coco_metrics.csv", "metrics.csv", "results.png",
+                             "metadata.json", "run_summary.json"):
                     path = self.run_dir / name
                     if path.is_file():
                         artifact.add_file(str(path), name=name)
                 for folder in ("reports", "validation"):
                     for path in sorted((self.run_dir / folder).rglob("*")):
-                        if path.is_file():
+                        if path.is_file() and "cache" not in path.relative_to(self.run_dir).parts:
                             artifact.add_file(str(path), name=path.relative_to(self.run_dir).as_posix())
                 logged = self.run.log_artifact(artifact, aliases=["best-checkpoint", "final"])
                 if self.config["tracking"]["mode"] == "online":
@@ -100,7 +116,11 @@ class ExperimentTracker:
         except BaseException as exc:
             exit_status = "failed"
             self.run.summary["research/status"] = "failed"
-            self.run.summary["research/error"] = f"{type(exc).__name__}: {exc}"
+            error_text = f"{type(exc).__name__}: {exc}"
+            key = os.getenv("WANDB_API_KEY")
+            self.run.summary["research/error"] = error_text.replace(key, "[REDACTED]") if key else error_text
+            if key and key in error_text:
+                raise RuntimeError(self.run.summary["research/error"]) from None
             raise
         finally:
             if upload_started is not None:
@@ -130,10 +150,11 @@ class EpochRecorder:
         best = numeric(trainer.best_fitness, name="best_fitness")
         is_best = fitness is not None and best is not None and fitness == best
         if is_best:
+            # Ultralytics menimpa best.pt juga saat fitness seri; epoch terbaru berlaku.
             self.best_epoch, self.best_fitness = epoch, best
         self.last_saved_epoch = epoch
         self.checkpoints.append({"epoch": epoch, "fitness": fitness, "best_fitness": best,
-                                 "is_best_at_save": is_best})
+                                 "is_best_at_save": is_best, "best_epoch": self.best_epoch})
         pd.DataFrame(self.checkpoints).to_csv(self.run_dir / "checkpoint_manifest.csv", index=False)
         if self.config["tracking"]["upload_checkpoint_each_epoch"]:
             checkpoint = Path(trainer.wdir) / f"epoch{trainer.epoch}.pt"
@@ -153,6 +174,8 @@ class EpochRecorder:
                     values[key] = value
         values["fit/fitness"] = numeric(trainer.fitness, name="fitness")
         values["fit/best_fitness"] = numeric(trainer.best_fitness, name="best_fitness")
+        values["checkpoint/best_epoch"] = self.best_epoch
+        values["checkpoint/is_best"] = self.checkpoints[-1]["is_best_at_save"]
         if self.epoch_started is not None:
             values["fit/epoch_seconds"] = time.perf_counter() - self.epoch_started
         import torch
@@ -168,6 +191,11 @@ class EpochRecorder:
         pd.DataFrame(self.rows).to_csv(self.run_dir / "epoch_history.csv", index=False)
         self.tracker.log(values, step=epoch)
         self.last_logged_epoch = epoch
+        map_value = values.get("metrics/mAP50-95(B)")
+        map_text = "belum tersedia" if map_value is None else f"{map_value:.5f}"
+        updated = "ya" if values["checkpoint/is_best"] else "tidak"
+        print(f"Epoch {epoch}/{self.config['training']['epochs']} | mAP50-95 {map_text} | "
+              f"Best epoch {self.best_epoch} | best.pt diperbarui: {updated}", flush=True)
 
     def attach(self, model) -> None:
         model.add_callback("on_train_epoch_start", self.on_epoch_start)

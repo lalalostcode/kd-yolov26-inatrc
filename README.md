@@ -1,17 +1,26 @@
 # InaTRC · YOLO26 Knowledge Distillation
 
-Repository skripsi dengan fondasi Tahap A dan **implementasi/pilot Tahap B**: audit InaTRC, teacher YOLO26m, baseline YOLO26s/n, Native/CrossKD/CSAKD, evaluasi `best.pt`, W&B manual, dan satu runner Kaggle. Default CLI/notebook adalah **smoke sintetis nonfinal**; tidak ada full training atau multiseed otomatis.
+Repository skripsi dengan fondasi Tahap A dan **implementasi/pilot Tahap B**: audit InaTRC, teacher YOLO26m, baseline YOLO26s/n, Native/CrossKD/CSAKD, evaluasi `best.pt`, serta W&B manual. Jalur utama penggunaan adalah **sembilan notebook mandiri Kaggle/Colab**: semua kode eksperimen tampil langsung dalam notebook, tanpa clone GitHub, uv, atau import modul repository saat dijalankan. CLI lokal tetap tersedia dan default smoke.
+
+**Periksa `MODE` sebelum Run All:** notebook teacher, baseline, dan Native KD default **full**; CrossKD/CSAKD default **smoke**. Semua memakai seed 42 dan W&B disabled. Pengujian implementasi dibatasi pada smoke sintetis satu epoch; full training dan multiseed tidak dijalankan oleh pengembang.
+
+Verifikasi notebook mandiri: **187 passed** pada Python 3.12 dan **187 passed** pada Python 3.13 untuk suite tanpa smoke; **sembilan smoke CPU mandiri lolos di luar checkout**. State student awal baseline/KD cocok pada s/n dengan seed sama. Instalasi pip/provider Secrets memakai mock; GPU Kaggle/Colab belum diuji. Perintah, bukti, dan batas verifikasi ada di [laporan notebook mandiri](docs/standalone_notebooks.md).
 
 Audit referensi awal ada dalam [docs/audit.md](docs/audit.md). Native memakai API resmi Ultralytics; CrossKD/CSAKD memakai adaptasi yang dijelaskan di [desain Tahap B](docs/stage_b_design.md). Default CSAKD mengikuti persamaan paper; varian fungsi loss kode penulis tersedia secara eksplisit. Bobot KD custom masih bobot pilot, belum konfigurasi final InaTRC. Hasil terkini ada dalam [laporan Tahap B](docs/stage_b_report.md).
 
-Verifikasi Python 3.13 terbaru: **173 test passed, 3 skipped** (CUDA/AMP GPU tidak tersedia). Smoke baseline/Native/CrossKD/CSAKD pada s dan n menghasilkan `best.pt` yang dimuat ulang dan divalidasi. Dataset InaTRC asli, GPU Kaggle, dan layanan W&B online belum diuji. Detail environment, perubahan lock, dan strategi mempertahankan CUDA kernel ada di [laporan Python 3.13](docs/python313_compatibility.md). [Laporan Tahap A](docs/stage_a_report.md) dan [laporan Tahap B](docs/stage_b_report.md) dipertahankan sebagai catatan hasil sebelumnya.
+Catatan verifikasi runner repository sebelumnya: **277 passed, 3 skipped** pada suite lengkap Python 3.12; **162 passed, 1 skipped** untuk notebook/bootstrap/kompatibilitas Python 3.13. CUDA/AMP GPU tidak tersedia. Smoke baseline/Native/CrossKD/CSAKD pada s dan n menghasilkan `best.pt` yang dimuat ulang dan divalidasi. Dataset InaTRC asli, GPU Kaggle, dan layanan W&B online belum diuji. Perintah dan batas verifikasi ada di [laporan notebook eksperimen](docs/notebook_experiments.md). Detail environment, perubahan lock, dan strategi mempertahankan CUDA kernel ada di [laporan Python 3.13](docs/python313_compatibility.md). [Laporan Tahap A](docs/stage_a_report.md) dan [laporan Tahap B](docs/stage_b_report.md) dipertahankan sebagai catatan hasil sebelumnya.
 
 ## Struktur
 
 ```text
 configs/                    dataset, training, KD, tracking
 src/inatrc_kd/              konfigurasi, audit, training, evaluasi, KD, rekap
-notebooks/01_kaggle_runner.ipynb
+notebooks/standalone/        sembilan notebook mandiri; jalur utama Kaggle/Colab
+scripts/generate_standalone_notebooks.py  generator lokal notebook mandiri
+scripts/standalone_runtime.py  helper setup yang ditanam sebagai kode notebook
+notebooks/01_kaggle_runner.ipynb  runner repository / template lama
+notebooks/experiments/       sembilan runner berbasis source repository
+scripts/generate_experiment_notebooks.py  generator runner repository
 tests/                      logika audit/config dan regresi smoke
 docs/audit.md               audit referensi dan keputusan kompatibilitas
 reference/                  spesifikasi dan referensi asli
@@ -20,7 +29,7 @@ pyproject.toml · uv.lock    environment dan dependency terkunci
 
 Output setiap eksperimen ada dalam direktori unik di `outputs/`, dengan identitas stage/model/method/seed/mode. Training yang berhasil menyimpan `best.pt`, `results.csv`, metrik agregat dan AP per kelas, resolved config, metadata environment/source, dan ringkasan run. `latest_run.json` hanya menunjuk run terakhir; hasil run lama tidak ditimpa.
 
-Untuk membaca kode, mulai dari `cli.py → config.py → train.py → evaluate.py`. Notebook hanya menyiapkan environment dan memanggil CLI. `data.py` memeriksa gambar/label, `preflight.py` memeriksa environment/model, dan `pipeline.py` menghubungkan loader dengan Ultralytics. `tracking.py` mencatat hasil; `summary.py` merekap beberapa run; `io.py` menyediakan helper file/hash. Folder `kd/` memisahkan algoritme KD dari alur training. Docstring di awal setiap file dan komentar pada langkah penting menjelaskan perannya secara singkat.
+Untuk membaca notebook mandiri, ikuti heading Bahasa Indonesia dari **Konfigurasi Eksperimen** hingga **Ringkasan dan Unduh Hasil**. Definisi fungsi dipisahkan dari cell yang menjalankannya; hanya algoritme KD yang diperlukan notebook tersebut yang dimuat. Untuk source repository lokal, mulai dari `cli.py → config.py → train.py → evaluate.py`. `data.py` memeriksa gambar/label, `preflight.py` memeriksa environment/model, dan `pipeline.py` menghubungkan loader dengan Ultralytics. `tracking.py` mencatat hasil; `summary.py` merekap beberapa run; `io.py` menyediakan helper file/hash. Folder `kd/` memisahkan algoritme KD dari alur training. Docstring di awal setiap file dan komentar pada langkah penting menjelaskan perannya secara singkat.
 
 ## Setup Windows PowerShell
 
@@ -52,38 +61,56 @@ uv run --frozen python -m inatrc_kd run --student n --method none --seed 42 --mo
 
 Lock memilih Torch/Torchvision **CPU** secara eksplisit untuk verifikasi lokal; tidak mengklaim GPU Windows aktif. Untuk eksperimen GPU, gunakan strategi Kaggle di bawah. Versi Ultralytics `8.4.155` dan W&B `0.28.1` mengikuti baseline teruji setelah audit API; versi efektif tetap dicatat setiap run.
 
-## Satu eksperimen di Kaggle
+## Notebook mandiri untuk Kaggle dan Colab
 
-1. Upload [notebooks/01_kaggle_runner.ipynb](notebooks/01_kaggle_runner.ipynb), aktifkan GPU, dan lampirkan dataset InaTRC bila tersedia.
-2. Isi `REPO_URL` dan **commit SHA lengkap 40 karakter**, atau `SNAPSHOT_ROOT` yang berisi `pyproject.toml` + `uv.lock`. Clone membutuhkan internet. Snapshot source disalin dari Input ke Working dan diberi fingerprint.
-3. Pilih `STAGE`, `STUDENT`, `METHOD`, `SEED`, `MODE`. Default: student n / none / 42 / smoke. Teacher selalu m. Isi `DATASET_ROOT` bila deteksi otomatis menemukan lebih dari satu root.
-4. Run All mem-bootstrap uv melalui interpreter kernel, menyiapkan venv, memeriksa CUDA/dependency, lalu menjalankan **satu** eksperimen.
-5. Lihat `best.pt` dan metrics pada cell terakhir. Simpan melalui **Save Version** atau W&B artifact; filesystem sesi Kaggle tidak permanen.
+| Nomor | Notebook | Model | Metode | MODE default |
+| --- | --- | --- | --- | --- |
+| 01 | [Teacher](notebooks/standalone/01_teacher_yolo26m.ipynb) | YOLO26m | none | full |
+| 02 | [Baseline s](notebooks/standalone/02_baseline_yolo26s.ipynb) | YOLO26s | none | full |
+| 03 | [Baseline n](notebooks/standalone/03_baseline_yolo26n.ipynb) | YOLO26n | none | full |
+| 04 | [Native s](notebooks/standalone/04_native_yolo26s.ipynb) | YOLO26s | native | full |
+| 05 | [Native n](notebooks/standalone/05_native_yolo26n.ipynb) | YOLO26n | native | full |
+| 06 | [CrossKD s](notebooks/standalone/06_crosskd_yolo26s.ipynb) | YOLO26s | crosskd | smoke |
+| 07 | [CrossKD n](notebooks/standalone/07_crosskd_yolo26n.ipynb) | YOLO26n | crosskd | smoke |
+| 08 | [CSAKD s](notebooks/standalone/08_csakd_yolo26s.ipynb) | YOLO26s | csakd | smoke |
+| 09 | [CSAKD n](notebooks/standalone/09_csakd_yolo26n.ipynb) | YOLO26n | csakd | smoke |
 
-Pengambilan GitHub hanya melakukan satu fetch commit pilihan dengan `--depth 1 --no-tags`, lalu checkout detached; history/branch/tag lain tidak diambil. Source yang sudah sesuai dipakai ulang. Fingerprint tidak menelusuri venv/cache. Setup pertama tetap perlu mengunduh dependency sesuai lock, tetapi `--no-dev` melewati paket test dan Torch/torchvision tetap diwarisi. Untuk mencoba metode lain, gunakan sesi yang sama agar venv/cache dipakai ulang. Waktu `Source selesai` dan `Setup selesai` dicetak terpisah. Jika tetap lama, kirim dua durasi tersebut dan baris download terakhir; kecepatan jaringan Kaggle belum diukur di sini.
+1. Upload **satu** notebook ke Kaggle, aktifkan GPU dan Internet, lalu tambahkan dataset InaTRC melalui **Add Input**. Untuk memeriksa setup dahulu, pilih **03 Baseline n** dan ubah `MODE = "smoke"`.
+2. Baca **Konfigurasi Eksperimen**. Stage/model/metode sudah sesuai nama notebook; isi `DATASET_ROOT` jika deteksi otomatis menemukan lebih dari satu dataset, pilih seed/device/W&B, dan isi `TEACHER_CKPT` untuk KD full.
+3. Run All memasang dependency memakai **pip pada interpreter kernel**, memeriksa GPU/ABI dan dataset, lalu menjalankan **tepat satu eksperimen**. Tidak perlu mengisi URL/commit repository atau mengunggah file `src/` dan `configs/`.
+4. Setiap epoch mencetak metrik, fitness, `is_best`, dan `best_epoch`. Hasil, checkpoint, serta ZIP tersedia di **Ringkasan dan Unduh Hasil**. Di Kaggle, simpan dengan **Save Version** atau unduh hasil sebelum sesi berakhir.
 
-Untuk Colab, gunakan notebook yang sama: uncomment empat assignment pada blok `COLAB PATHS` di cell konfigurasi, aktifkan GPU melalui Runtime → Change runtime type, lalu isi `REPO_URL` + `REPO_COMMIT` atau snapshot. Upload input ke `/content/inputs`; blok `COLAB DRIVE` yang dikomentari dapat dipakai jika input ada di Google Drive. Jika W&B online, buat secret `WANDB_API_KEY` di panel 🔑 Secrets, aktifkan Notebook access, dan uncomment dua baris pada blok `COLAB SECRET` di cell Secrets. Setup uv, pemeriksaan Torch, dan pipeline tetap dipakai bersama. Output default `/content/outputs` harus diunduh/disalin ke Drive sebelum sesi berakhir. Python kernel harus 3.11/3.12/3.13; incompatibility tetap gagal eksplisit. Blok Colab diuji lokal dengan mock Secrets, bukan pada runtime GPU Colab nyata. API Secrets mengikuti [source resmi Colab](https://github.com/googlecolab/colabtools/blob/main/google/colab/userdata.py).
+Kaggle/Colab terdeteksi otomatis. Di Colab, aktifkan GPU melalui **Runtime → Change runtime type**, isi path dataset yang tersedia, dan uncomment blok Google Drive bila diperlukan. Blok Drive tetap dikomentari agar penggunaan Kaggle langsung bekerja. Output default `/kaggle/working/outputs` atau `/content/outputs` mengikuti platform.
 
-Dataset menggunakan layout asli `ROOT/{train,val,test}/{images,labels}`. Audit mencatat pasangan file, kelas, bbox YOLO lima kolom, label kosong, distribusi, fingerprint, dan duplikasi byte identik lintas split. Polygon/format lain atau data tidak valid menyebabkan kegagalan jelas. Tidak ada konversi, relabel, penghapusan, atau split ulang otomatis. Jumlah referensi 3.250 gambar dikonfigurasi di `configs/dataset.yaml`. Pemeriksaan hash tidak membuktikan tidak adanya kebocoran temporal.
+Dependency utama dipin ke Ultralytics `8.4.155`, W&B `0.28.1`, dan faster-coco-eval `1.6.7`; versi aplikasi lainnya ditanam dari lock repository. Pip membuat rencana instalasi terlebih dahulu. Jika rencana mencoba memasang/mengganti Torch atau torchvision kernel, notebook berhenti sebelum perubahan tersebut. Paket yang telah di-resolve dipasang dengan `--no-deps`, lalu versi/lokasi Torch, CUDA, torchvision NMS, dan NumPy ↔ Torch diperiksa. Jika paket sudah di-import dengan versi berbeda, restart kernel setelah setup sesuai pesan error. Log setup tersimpan di folder output; setup pertama tetap memerlukan unduhan dependency, tetapi tidak mengambil source/history GitHub.
 
-Smoke selalu memakai data sintetis dan inisialisasi model acak tanpa mengunduh bobot. InaTRC yang terpasang tetap diaudit, tetapi hasil smoke bukan metrik penelitian. KD native smoke dapat menggunakan teacher diagnostik acak bila checkpoint belum diberikan; ini bukan checkpoint teacher penelitian.
+Untuk W&B, biarkan `WANDB_MODE = "disabled"` selama smoke awal. Mode `offline` tidak membutuhkan login. Mode `online` mengambil `WANDB_API_KEY` dari environment, **Kaggle Secrets**, atau **Colab Secrets** sesuai platform. Kaggle: tambahkan secret bernama `WANDB_API_KEY` dan aktifkan akses notebook. Colab: tambahkan secret dengan nama sama di panel 🔑 dan aktifkan **Notebook access**. Jangan menulis key langsung di cell; nilainya tidak dimasukkan ke konfigurasi, log, atau ZIP.
 
-Strategi CUDA runner:
+Semua KD full memerlukan **teacher YOLO26m InaTRC lima kelas yang sama**. Jalankan notebook 01 lebih dahulu, simpan `best.pt`, lalu lampirkan checkpoint tersebut sebagai Kaggle Input atau pilih path di Colab. Pertahankan checkpoint teacher yang sama untuk Native/CrossKD/CSAKD; hash dicatat setiap run. Teacher sintetis hanya dibuat untuk smoke dan ditandai sebagai diagnosis nonfinal. CrossKD/CSAKD tetap konfigurasi **pilot Tahap B**, bukan konfigurasi penelitian final.
 
-```text
-uv venv --python <interpreter-kernel> --system-site-packages --no-python-downloads .venv
-uv sync --frozen --no-dev --python <interpreter-kernel> --no-python-downloads --no-install-package torch --no-install-package torchvision
-uv run --frozen --no-sync --python <interpreter-kernel> python -m inatrc_kd preflight --device 0 --require-gpu
-uv run --frozen --no-sync --python <interpreter-kernel> python -m inatrc_kd run ...
+Full mempertahankan protokol baseline: 640 px, batch 16, maksimal 100 epoch, patience 25, AdamW, lr0 0.001, weight decay 0.0005, warmup 3, AMP, deterministic, serta augmentasi yang sama. Semua model full dimulai dari pretrained COCO sesuai ukuran; hash checkpoint dan state awal student dicatat untuk membandingkan baseline/KD pada ukuran dan seed yang sama. Batch tidak diturunkan otomatis ketika OOM.
+
+Audit membaca layout `ROOT/{train,val,test}/{images,labels}`, mempertahankan urutan lima kelas, dan memeriksa pasangan file, gambar rusak, bbox YOLO lima kolom, label kosong, anotasi duplikat, serta fingerprint isi file. Audit semua split tidak berarti mengevaluasi test set: training/pemilihan checkpoint/evaluasi akhir hanya memakai train/val. Cache loader ditempatkan di output, bukan dataset Input. Jumlah referensi 3.250 gambar harus cocok atau di-override secara eksplisit. Hash identik lintas split dilaporkan; kebocoran temporal/perseptual belum diperiksa.
+
+Evaluasi memuat ulang `YOLO(best.pt)` tanpa teacher dan memakai val: `nms=None`, confidence efektif 0.001, IoU 0.7, max_det 300, augmentasi off, dan FP32. Metrik utama tetap mAP50–95 Ultralytics. **COCO AP/AP50/AP-S/AP-M/AP-L** disimpan terpisah dengan area dalam piksel gambar asli dan maxDets `[1,10,100]`; angka ini memakai protokol berbeda dari max_det 300. AP kelas/kelompok ukuran tanpa ground truth yang valid menjadi null. Parameter/FLOPs dihitung dari checkpoint lima kelas sebelum fusion; latency perkiraan, VRAM, dan durasi training dilaporkan terpisah.
+
+Logging lokal selalu aktif, termasuk saat W&B disabled. `epoch_history.csv` dan `checkpoint_manifest.csv` mencatat epoch serta kejadian penyimpanan checkpoint. `best_epoch` mengikuti penyimpanan `best.pt`, termasuk fitness seri ketika Ultralytics menimpa checkpoint dengan epoch terbaru. Final validation tidak menambahkan epoch training duplikat. ZIP hasil menyertakan `best.pt`, `last.pt` bila tersedia, `results.csv`, konfigurasi, metadata, metrik, serta kurva. Finalisasi normal Ultralytics dapat menghapus optimizer state dari checkpoint akhir.
+
+Detail alur, hasil verifikasi aktual, dan batasnya ada di [panduan notebook mandiri](docs/standalone_notebooks.md). GPU Kaggle/Colab, dataset InaTRC nyata, serta layanan W&B online belum dibuktikan oleh smoke CPU lokal.
+
+### Pemeliharaan dan runner repository
+
+Generator dijalankan **lokal oleh maintainer**. Notebook hasilnya dapat dipakai tanpa generator maupun repository:
+
+```powershell
+uv run --frozen python scripts/generate_standalone_notebooks.py
+uv run --frozen python scripts/generate_standalone_notebooks.py --check
+uv run --frozen pytest tests/test_standalone_notebooks.py tests/test_standalone_runtime.py tests/test_coco.py tests/test_config_tracking.py
 ```
 
-Torch/Torchvision CUDA preinstalled diwarisi sebagai pengecualian lock yang eksplisit; versi aktifnya boleh berbeda dari pasangan CPU lokal terkunci jika masih memenuhi dependency proyek dan pasangan versi resmi yang kompatibel. Paket lain mengikuti lock. **Jangan hilangkan `--no-sync` dari pemanggilan Kaggle setelah setup**: sync otomatis dapat memasang Torch CPU dari lock. Runner membandingkan lokasi/versi Torch dan torchvision serta versi Python sebelum dan setelah setup. Preflight memeriksa pasangan versi serta dependency wajib `Requires-Dist` Torch/Torchvision yang benar-benar aktif, lalu melakukan operasi CUDA kecil, torchvision NMS, dan konversi NumPy ↔ Torch, bukan hanya `cuda.is_available()`. Ketidakcocokan dependency/CUDA/ABI/OOM menyebabkan kegagalan jelas; runner tidak mengganti wheel Torch atau menurunkan batch otomatis.
+Jangan mengedit sembilan salinan setup satu per satu. Ubah source/generator, regenerasi, lalu periksa diff. Notebook berisi fungsi/kelas Python biasa; tidak ada source tersembunyi melalui `exec`, base64, atau modul sementara.
 
-**Python 3.13:** menurut [tabel resmi torchvision](https://github.com/pytorch/vision#installation), gunakan Torch ≥2.7 dengan pasangan torchvision ≥0.22 yang sesuai. Torch 2.4–2.6 hanya diterima pada Python 3.11/3.12; nightly/prerelease tidak diterima. Lock CPU tetap Torch 2.10.0/torchvision 0.25.0, dengan wheel CPython 3.13. Strategi ini mempertahankan ABI kernel; mengganti kernel ke 3.12 sambil memakai wheel CPython 3.13 tidak didukung. Jika notebook lama masih berhenti pada batas 3.12, perbarui notebook **dan** snapshot/commit repository yang berisi `pyproject.toml`, `uv.lock`, serta `src` terbaru. Gunakan sesi baru untuk menghindari venv/source lama.
-
-Kaggle GPU **belum dinyatakan teruji** oleh verifikasi lokal. Lock lintas environment tidak menjamin kompatibilitas CUDA. Python, dependency aktif, GPU, CUDA, hash lock, dan commit/fingerprint source dicatat.
-
-Untuk internet nonaktif, lampirkan snapshot source, binary uv Linux 0.9.8, dan cache uv Linux sesuai versi Python kernel yang telah diisi dependency beserta build backend. Isi `OFFLINE=True`, `UV_BINARY`, dan `UV_CACHE_INPUT`. Cache disalin ke Working sebelum sync `--offline`. Source saja tidak cukup; paket yang tidak tersedia menghasilkan kegagalan jelas. Untuk full pretrained training offline, lampirkan bobot pretrained COCO yang sesuai model (m/s/n, head 80 kelas) dan pilih path melalui `MODEL_WEIGHTS` atau CLI `--weights`. Lampirkan teacher InaTRC lima kelas secara terpisah melalui `TEACHER_CKPT`/`--teacher-ckpt` untuk KD. Bobot baseline yang telah selesai fine-tuning bukan inisialisasi student. Portabilitas cache harus diverifikasi pada Kaggle; jangan mengasumsikan wheelhouse biasa menggantikan URL dalam frozen lock.
+[Runner umum](notebooks/01_kaggle_runner.ipynb) dan [sembilan runner repository](docs/notebook_experiments.md) tetap tersedia untuk penggunaan berbasis source/commit. Jalur lama memakai Git/uv dan mendukung snapshot offline beserta cache dependency Linux; kebutuhan tersebut **hanya berlaku untuk runner repository**, bukan notebook mandiri. Setup lokal PowerShell/Linux di atas juga tetap memakai uv.
 
 ## Pilihan run dan hasil
 
@@ -106,7 +133,7 @@ uv run --frozen python -m inatrc_kd run --stage student --student s --method non
 uv run --frozen python -m inatrc_kd run --stage student --student n --method none --seed 42 --mode full --dataset-root "/path/to/InaTRC" --device 0
 ```
 
-Di Kaggle, gunakan notebook dengan MODE=full setelah protokol final disetujui; jangan menjalankan perintah lokal tersebut pada venv CPU yang sedang dipakai. Teacher antarsesi disimpan sebagai Kaggle output/dataset atau W&B artifact, lalu dilampirkan ke Input dan dipilih melalui `TEACHER_CKPT`. Gunakan checkpoint teacher tetap untuk seluruh kondisi KD. Pilot sintetis keempat kondisi sudah tersedia pada s/n; verifikasi GPU dan teacher InaTRC nyata masih diperlukan. Multiseed adalah Tahap C.
+Di Kaggle/Colab, gunakan notebook mandiri dengan MODE=full untuk protokol baseline/Native yang dipilih. CrossKD/CSAKD full memerlukan keputusan konfigurasi pilot terlebih dahulu. Jangan menjalankan perintah full lokal tersebut pada venv CPU yang sedang dipakai. Teacher antarsesi disimpan sebagai Kaggle output/dataset atau W&B artifact, lalu dilampirkan ke Input dan dipilih melalui `TEACHER_CKPT`. Gunakan checkpoint teacher tetap untuk seluruh kondisi KD. Pilot sintetis keempat kondisi sudah tersedia pada s/n; verifikasi GPU dan teacher InaTRC nyata masih diperlukan. Multiseed adalah Tahap C.
 
 Diagnosis custom KD satu run dan probe gradient:
 
@@ -135,4 +162,4 @@ git remote add origin https://github.com/USER/REPO.git
 git push -u origin HEAD
 ```
 
-Jika remote origin sudah ada, gunakan remote yang benar tanpa menambahkannya lagi. Setelah push, salin SHA commit dari `git rev-parse HEAD` ke notebook Kaggle.
+Jika remote origin sudah ada, gunakan remote yang benar tanpa menambahkannya lagi. Notebook mandiri dapat diunggah langsung ke Kaggle/Colab tanpa push. SHA commit hanya diperlukan jika Anda memilih runner repository lama.
